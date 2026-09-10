@@ -539,6 +539,80 @@ select {
   transform: translateY(-50%);
 }
 
+.s3-crosshair.hit::before,
+.s3-crosshair.hit::after {
+  background: #ffffff;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.9);
+  animation: s3hit 0.18s ease-out;
+}
+
+.s3-crosshair.headhit::before,
+.s3-crosshair.headhit::after {
+  background: #ffd24a;
+  box-shadow: 0 0 10px rgba(255, 210, 74, 0.95);
+  animation: s3hit 0.22s ease-out;
+}
+
+@keyframes s3hit {
+  0% {
+    transform: translateX(-50%) scale(1.9);
+  }
+  100% {
+    transform: translateX(-50%) scale(1);
+  }
+}
+
+/* 敌人血条 */
+.s3-hpbar {
+  position: absolute;
+  width: 64px;
+  height: 6px;
+  margin-left: -32px;
+  margin-top: -14px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 3px;
+  overflow: hidden;
+  display: none;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.s3-hpbar i {
+  display: block;
+  height: 100%;
+  width: 100%;
+  background: #7cfc9b;
+  transition: width 0.12s linear;
+}
+
+/* 伤害数字 */
+.s3-dmg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 7;
+}
+
+.s3-dmg-item {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font: 800 18px 'Segoe UI', sans-serif;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.8);
+  animation: s3dmg 0.7s ease-out forwards;
+}
+
+@keyframes s3dmg {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -140%) scale(1.05);
+  }
+}
+
 .s3-banner {
   position: absolute;
   top: 24%;

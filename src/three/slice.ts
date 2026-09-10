@@ -190,10 +190,15 @@ function buildEnemy(): {
     }
   });
 
-  // 命中判定分区：头部与躯干单独标记
+  // 命中判定分区：整具身体都可命中（头/头发=爆头，其余=身体）
+  group.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    m.userData.isEnemy = true;
+    m.userData.zone = 'body';
+  });
   head.userData.zone = 'head';
-  torso.userData.zone = 'body';
-  vestMesh.userData.zone = 'body';
+  hairMesh.userData.zone = 'head';
 
   return {
     group,
@@ -291,6 +296,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       </div>
       <div class="s3-ammo"><span id="s3-ammo">25</span> / 25</div>
       <div class="s3-crosshair"></div>
+      <div class="s3-hpbar" id="s3-hpbar"><i></i></div>
+      <div class="s3-dmg" id="s3-dmg"></div>
       <div class="s3-banner" id="s3-banner"></div>
       <div class="s3-overlay" id="s3-overlay">
         <div class="s3-card">
@@ -309,6 +316,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const accEl = container.querySelector<HTMLElement>('#s3-acc')!;
   const hpEl = container.querySelector<HTMLElement>('#s3-hp')!;
   const bannerEl = container.querySelector<HTMLElement>('#s3-banner')!;
+  const hpBarEl = container.querySelector<HTMLElement>('#s3-hpbar')!;
+  const dmgLayer = container.querySelector<HTMLElement>('#s3-dmg')!;
+  const crosshairEl = container.querySelector<HTMLElement>('.s3-crosshair')!;
 
   /* ---------------- Three.js 初始化 ---------------- */
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -367,9 +377,6 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const enemy = buildEnemy();
   scene.add(enemy.group);
 
-  // 调试挂点（便于自动化测试读取运行时状态）
-  (window as unknown as { __slice3d?: unknown }).__slice3d = { enemy, camera, scene };
-
   type EnemyState = 'hidden' | 'walking' | 'aiming' | 'dead';
   const enemyAI = {
     state: 'hidden' as EnemyState,
@@ -395,6 +402,22 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     enemy.materials.forEach((m) => m.emissive.setHex(0x000000));
   };
   resetEnemy();
+
+  // 调试挂点（便于自动化测试读取运行时状态与瞄准某点）
+  const debugAim = (x: number, y: number, z: number): void => {
+    const dx = x - camera.position.x;
+    const dy = y - camera.position.y;
+    const dz = z - camera.position.z;
+    yaw = Math.atan2(-dx, -dz);
+    pitch = Math.atan2(dy, Math.hypot(dx, dz));
+  };
+  (window as unknown as { __slice3d?: unknown }).__slice3d = {
+    enemy,
+    camera,
+    scene,
+    ai: enemyAI,
+    aimAt: debugAim,
+  };
 
   /* ---------------- 输入与射击 ---------------- */
   const keys = new Set<string>();
@@ -496,12 +519,24 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
     if (hits.length > 0) {
       const hitObj = hits[0].object as THREE.Mesh;
-      const zone = (hitObj.userData.zone as string | undefined) ?? null;
-      const enemyHit = zone !== null && enemyAI.state !== 'dead';
+      // 沿父级向上判断是否属于敌人（避免手臂/腿/武器漏判）
+      let isEnemyPart = false;
+      let cursor: THREE.Object3D | null = hitObj;
+      while (cursor) {
+        if (cursor.userData?.isEnemy) {
+          isEnemyPart = true;
+          break;
+        }
+        cursor = cursor.parent;
+      }
+      const zone = (hitObj.userData.zone as string | undefined) ?? 'body';
+      const enemyHit = isEnemyPart && enemyAI.state !== 'dead';
       if (enemyHit) {
         const dmg = shotDamage(zone === 'head', 'headshot');
         enemyAI.hp = Math.max(0, enemyAI.hp - dmg);
         stats.hits++;
+        showHitmarker(zone === 'head');
+        spawnDamageText(hits[0].point, zone === 'head' ? '爆头' : `-${dmg}`, zone === 'head' ? '#ffd24a' : '#ff9a86');
         lastShotRecord.hit = true;
         lastShotRecord.head = zone === 'head';
         if (currentEncounter) {
@@ -548,6 +583,26 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     window.setTimeout(() => {
       bannerEl.className = 's3-banner';
     }, 850);
+  };
+
+  /** 命中准星闪光 */
+  const showHitmarker = (head: boolean): void => {
+    crosshairEl.classList.remove('hit', 'headhit');
+    void crosshairEl.offsetWidth;
+    crosshairEl.classList.add(head ? 'headhit' : 'hit');
+  };
+
+  /** 伤害数字：把世界坐标投影到屏幕后生成漂浮文字 */
+  const spawnDamageText = (world: THREE.Vector3, text: string, color: string): void => {
+    const v = world.clone().project(camera);
+    const el = document.createElement('div');
+    el.className = 's3-dmg-item';
+    el.textContent = text;
+    el.style.color = color;
+    el.style.left = `${((v.x + 1) / 2) * 100}%`;
+    el.style.top = `${((-v.y + 1) / 2) * 100}%`;
+    dmgLayer.appendChild(el);
+    window.setTimeout(() => el.remove(), 700);
   };
 
   const openEncounter = (): void => {
@@ -753,6 +808,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       g.rotation.y = Math.atan2(toPlayer.x, toPlayer.z) + Math.PI;
       if (enemyAI.timer <= 0) {
         // 开火：扣血 + 红屏 + 阵亡计数
+        // 注意：这里**不能** resetEnemy()——那会把敌人血量一起回满（曾经的"无敌帧"Bug）
         stats.deaths++;
         hpEl.textContent = '0';
         sfx.enemyShot();
@@ -762,17 +818,38 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
           currentEncounter.attacked = true;
           closeEncounter(false);
         }
-        resetEnemy();
+        // 保持血量与位置，敌人继续瞄准（下次开火前有同样的前摇），直到被击杀
+        enemyAI.timer = CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0]);
         window.setTimeout(() => {
           hpEl.textContent = '100';
         }, 900);
       }
     } else if (enemyAI.state === 'dead') {
-      // 倒地动画
-      enemyAI.dieProgress = Math.min(1, enemyAI.dieProgress + dt * 2.6);
+      // 倒地动画（放慢，并保留尸体一小段时间，避免看起来"打死又复活"）
+      enemyAI.dieProgress = Math.min(1, enemyAI.dieProgress + dt * 1.1);
       g.rotation.x = -enemyAI.dieProgress * 1.35;
       g.position.y = -enemyAI.dieProgress * 0.18;
-      if (enemyAI.dieProgress >= 1) resetEnemy();
+      if (enemyAI.dieProgress >= 1) {
+        enemyAI.timer += dt;
+        if (enemyAI.timer > 1.0) resetEnemy();
+      }
+    }
+
+    // —— 敌人血条（投影到屏幕） ——
+    if (enemy.group.visible && enemyAI.state !== 'hidden') {
+      const top = new THREE.Vector3(enemy.group.position.x, 1.92, enemy.group.position.z).project(camera);
+      const onScreen = top.z < 1;
+      hpBarEl.style.display = onScreen ? 'block' : 'none';
+      if (onScreen) {
+        hpBarEl.style.left = `${((top.x + 1) / 2) * 100}%`;
+        hpBarEl.style.top = `${((-top.y + 1) / 2) * 100}%`;
+        const ratio = Math.max(0, enemyAI.hp / DAMAGE.maxHp);
+        const fill = hpBarEl.firstElementChild as HTMLElement;
+        fill.style.width = `${ratio * 100}%`;
+        fill.style.background = ratio > 0.5 ? '#7cfc9b' : ratio > 0.25 ? '#ffd166' : '#ff5c5c';
+      }
+    } else {
+      hpBarEl.style.display = 'none';
     }
 
     // —— 火花衰减 ——
