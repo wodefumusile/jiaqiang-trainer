@@ -1,0 +1,21 @@
+{
+  "name": "jiaqiang-trainer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "FPS 架枪/瞄准训练器（网页版）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "qa": "node scripts/qa.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.49.1",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.7",
+    "vitest": "^3.0.5"
+  }
+}
