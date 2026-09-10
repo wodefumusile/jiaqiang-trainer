@@ -115,6 +115,7 @@ export function renderMenu(app: HTMLElement): void {
       <div class="start-row">
         <button id="start-btn" class="btn-primary btn-lg">开始训练 · ${activeM.name} × ${activeM.usesScene ? activeSc.name : '竞技场'}</button>
         <p class="hint">进入训练后点击画面捕获鼠标，Esc 暂停</p>
+        <p class="hint"><a class="link-3d" href="${location.pathname}?view=3d">进入 3D 试验版（垂直切片）→</a></p>
       </div>
 
       <footer class="hint footer">
