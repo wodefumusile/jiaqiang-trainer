@@ -22,7 +22,7 @@ import { pushSession } from '../state/appStore';
 import type { EncounterRecord, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-0.5';
+const BUILD_STAMP = 'v3d-0.6';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -408,6 +408,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       <div class="s3-crosshair"></div>
       <div class="s3-dmg" id="s3-dmg"></div>
       <div class="s3-banner" id="s3-banner"></div>
+      <div class="s3-lock-hint hidden" id="s3-lock-hint">点击画面以捕获鼠标（否则无法转视角）</div>
       <div class="s3-overlay" id="s3-overlay">
         <div class="s3-card">
           <h2>3D 垂直切片</h2>
@@ -434,7 +435,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
             <button class="btn-ghost btn-sm" data-count="20">20</button>
             <button class="btn-ghost btn-sm" data-count="999">不限</button>
           </div>
-          <button class="btn-primary btn-lg" id="s3-start">点击进入</button>
+          <button class="btn-primary btn-lg" id="s3-start" disabled>初始化中…</button>
           <button class="btn-ghost" id="s3-bench">性能自检</button>
           <button class="btn-ghost" id="s3-quit">返回 2D 版</button>
           <div class="s3-bench-out" id="s3-bench-out"></div>
@@ -489,10 +490,38 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const benchBtn = container.querySelector<HTMLButtonElement>('#s3-bench')!;
   const benchOut = container.querySelector<HTMLElement>('#s3-bench-out')!;
   const lastLogEl = container.querySelector<HTMLElement>('#s3-lastlog')!;
+  const lockHintEl = container.querySelector<HTMLElement>('#s3-lock-hint')!;
+  /**
+   * 关键：场景构建需要几百毫秒，如果用户在构建完成前点"点击进入"，这一下会被丢掉
+   * （表现就是"点了没反应 / 卡住动不了"，时好时坏）。这里在最开头就记下点击意图，
+   * 并在按钮上显示"初始化中…"，构建完成后立即开始。
+   */
+  const startBtn = container.querySelector<HTMLButtonElement>('#s3-start')!;
+  let startRequested = false;
+  startBtn.disabled = true;
+  startBtn.textContent = '初始化中…';
+  startBtn.addEventListener('click', () => {
+    startRequested = true;
+  });
+  /** 敌人池是否已加载（决定"点击进入"是走加载流程还是直接开始） */
+  let sessionReady = false;
   // 事件日志：先占位再实现——因为在场景构建阶段（resetEnemy 初始化）就会调用 logEvent，
   // 若直接用 const/let 在后面声明会触发 TDZ 异常，导致挂载中断（这是踩过的坑）
   let eventLog: string[] = [];
   let logEvent: (msg: string) => void = () => {};
+  /**
+   * 请求鼠标指针锁定（必须在用户手势内同步调用）。
+   * 关键：**失败只提示、绝不抛异常**——一旦抛出会打断 start() 流程，
+   * 加载不执行、鼠标锁不上，表现就是"点击进入后动不了"（真实踩过的坑）。
+   */
+  const tryLock = (): void => {
+    try {
+      const p = canvas.requestPointerLock() as unknown as Promise<void> | undefined;
+      if (p && typeof p.catch === 'function') p.catch(() => undefined);
+    } catch {
+      // 忽略：点击画面会重试
+    }
+  };
 
   /** 本局敌人数量（玩家开局前可选），999 = 不限 */
   let sessionTarget = Number(localStorage.getItem('jg.slice3d.count') ?? '10') || 10;
@@ -1671,18 +1700,30 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
   const start = (): void => {
     overlay.classList.add('hidden');
+    tryLock();
+    // 关键修复：指针锁定必须在"用户手势"内**同步**申请。
+    // 之前放在 await 加载之后申请，已超出浏览器的手势有效期 → 被拒绝 →
+    // 鼠标无响应、视角冻住，表现就是"卡住动不了"（重载后偶发成功，所以时好时坏）
     void (async () => {
-      // 开局前加载：预建敌人池 + 预热着色器/特效，加载完成后才真正开打
-      loadingOverlay.classList.remove('hidden');
-      await loadSession(Math.min(sessionTarget, 24));
-      loadingOverlay.classList.add('hidden');
-      resetSessionStats();
-      if (gpuIsSoftware) {
-        showBanner('检测到软件渲染（未使用显卡）→ 请在浏览器开启硬件加速');
+      if (!sessionReady) {
+        // 首次进入：预建敌人池 + 预热着色器/特效
+        loadingOverlay.classList.remove('hidden');
+        await loadSession(Math.min(sessionTarget, 24));
+        loadingOverlay.classList.add('hidden');
+        sessionReady = true;
+        resetSessionStats();
+        logEvent(`开始本局：敌人 ${sessionTarget}，画质 ${qualityLevel}`);
+        if (gpuIsSoftware) {
+          showBanner('检测到软件渲染（未使用显卡）→ 请在浏览器开启硬件加速');
+        }
+      } else {
+        // 已经加载过（如 Esc 后再进）：直接开始，不重复加载
+        resetSessionStats();
       }
       running = true;
       lastT = performance.now();
-      canvas.requestPointerLock();
+      // 兜底：若同步申请被拒（Esc 退出后的冷却期），这里再试一次
+      if (document.pointerLockElement !== canvas) tryLock();
     })();
   };
 
@@ -1712,7 +1753,18 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     hooks.onExit();
   };
 
-  container.querySelector<HTMLButtonElement>('#s3-start')!.addEventListener('click', start);
+  // 顺序很关键：**先接上处理器，再启用按钮**。
+  // 反过来做的话，在"启用"到"接上处理器"之间点击会丢事件（表现为点了没反应/卡住）
+  startBtn.addEventListener('click', start);
+  startBtn.textContent = '点击进入';
+  startBtn.disabled = false;
+  if (startRequested) start();
+  // 兜底：开始界面**任意位置**点一下都能进入（避免点击被其它层吃掉导致"点了没反应"）
+  overlay.addEventListener('click', (e) => {
+    const el = e.target as HTMLElement | null;
+    if (el && el.closest('button') && el.closest('button') !== startBtn) return; // 其它按钮不触发
+    start();
+  });
   /**
    * 性能自检：把场景真实渲染 3 秒，输出帧率与帧时间分布。
    * 这是唯一能在主人机器上直接给出"到底跑不跑得动"的数字的办法。
@@ -1769,7 +1821,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     resetSessionStats();
     running = true;
     lastT = performance.now();
-    canvas.requestPointerLock();
+    tryLock();
   });
   backBtn.addEventListener('click', () => {
     resultOverlay.classList.add('hidden');
@@ -1780,7 +1832,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     hooks.onExit();
   });
   canvas.addEventListener('click', () => {
-    if (running && document.pointerLockElement !== canvas) canvas.requestPointerLock();
+    // 任何时候点击画面都尝试重新捕获鼠标（避免"没锁上就彻底动不了"）
+    if (document.pointerLockElement !== canvas) tryLock();
   });
   document.addEventListener('pointerlockchange', () => {
     if (running && document.pointerLockElement !== canvas) {
@@ -1818,6 +1871,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     if (dt * 1000 > maxFrameMs) maxFrameMs = dt * 1000;
     if (benchMode) benchSamples.push(dt * 1000);
     if (!running) return;
+    // 运行中但鼠标没被捕获 → 明确提示（这就是之前"卡住动不了"的可见症状）
+    if (running && document.pointerLockElement !== canvas) {
+      lockHintEl.classList.remove('hidden');
+    } else {
+      lockHintEl.classList.add('hidden');
+    }
 
     // —— 视角 ——
     camera.rotation.set(pitch, yaw, 0);
