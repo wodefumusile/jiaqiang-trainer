@@ -43,6 +43,14 @@ const CONFIG = {
   moveSpeed: 3.4,
   /** 敌人拉出身位（米） */
   peekOffsets: [0.5, 1.0, 1.6, 2.4],
+  /** 可拉出的掩体点位（敌人每次随机挑一个） */
+  covers: [
+    { id: '门洞左', x: -0.55, z: -6.2 },
+    { id: '门洞右', x: 0.55, z: -6.2 },
+    { id: '木箱后', x: -1.9, z: -4.3 },
+    { id: '木箱左', x: -2.9, z: -3.4 },
+    { id: '矮墙后', x: 2.2, z: -3.1 },
+  ],
   /** 敌人停下后的开火前摇（秒） */
   enemyAimTime: [0.55, 0.95],
   /** 敌人移动速度（米/秒） */
@@ -276,6 +284,29 @@ function buildRoom(): { root: THREE.Group; walls: THREE.Mesh[] } {
   root.add(lowWall);
   walls.push(lowWall);
 
+  // 场景道具：沙袋堆（左后）与壁灯（暖光）
+  const sandMat = new THREE.MeshStandardMaterial({ color: 0x6b6146, roughness: 0.95 });
+  for (let row = 0; row < 2; row++) {
+    for (let i = 0; i < 3 - row; i++) {
+      const bag = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 8), sandMat);
+      bag.scale.set(1.25, 0.72, 0.85);
+      bag.position.set(-5.4 + i * 0.72 + row * 0.36, 0.22 + row * 0.32, -1.2);
+      bag.castShadow = true;
+      bag.receiveShadow = true;
+      root.add(bag);
+    }
+  }
+  // 壁灯：自发光方块 + 暖色点光
+  const lampBody = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.12, 0.24),
+    new THREE.MeshStandardMaterial({ color: 0x2a2724, emissive: 0xffd9a0, emissiveIntensity: 0.6 }),
+  );
+  lampBody.position.set(CONFIG.roomWidth / 2 - 0.5, 2.6, -1.5);
+  root.add(lampBody);
+  const lamp = new THREE.PointLight(0xffd2a0, 5.5, 12, 2);
+  lamp.position.set(CONFIG.roomWidth / 2 - 0.9, 2.5, -1.5);
+  root.add(lamp);
+
   return { root, walls };
 }
 
@@ -383,22 +414,37 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     hp: DAMAGE.maxHp,
     timer: 0,
     peekTargetX: 0,
+    peekPos: new THREE.Vector3(0, 0, 0),
+    coverName: '',
+    crouch: false,
+    aimPose: 0,
     dieProgress: 0,
     walkPhase: 0,
   };
 
   /** 让敌人从门后出现在门内（隐藏 → 走出门洞） */
   const resetEnemy = (): void => {
+    const cover = CONFIG.covers[Math.floor(Math.random() * CONFIG.covers.length)];
     const offset = CONFIG.peekOffsets[Math.floor(Math.random() * CONFIG.peekOffsets.length)];
+    const side = Math.random() < 0.5 ? -1 : 1;
     enemyAI.state = 'hidden';
     enemyAI.hp = DAMAGE.maxHp;
     enemyAI.timer = 0.6 + Math.random() * 1.6; // 出现前的随机等待
-    enemyAI.peekTargetX = (Math.random() < 0.5 ? -1 : 1) * offset;
+    enemyAI.coverName = cover.id;
+    enemyAI.crouch = Math.random() < 0.35; // 约 1/3 概率蹲下
+    enemyAI.aimPose = 0;
+    // 从掩体后拉出：横向一个身位 + 朝玩家方向走出一段
+    enemyAI.peekTargetX = cover.x + side * offset;
+    enemyAI.peekPos.set(enemyAI.peekTargetX, 0, cover.z + 1.1 + Math.random() * 0.9);
     enemyAI.dieProgress = 0;
     enemy.group.visible = true;
-    // 从门洞正中（门后）出现，随后再拉出到开阔处，避免穿墙与只露头
-    enemy.group.position.set(0, 0, CONFIG.doorZ - 0.9);
+    enemy.group.scale.set(1, 1, 1);
+    enemy.group.position.set(cover.x, 0, cover.z);
     enemy.group.rotation.set(0, 0, 0);
+    enemy.leftArm.rotation.set(0, 0, 0);
+    enemy.rightArm.rotation.set(0, 0, 0);
+    enemy.leftLeg.rotation.set(0, 0, 0);
+    enemy.rightLeg.rotation.set(0, 0, 0);
     enemy.materials.forEach((m) => m.emissive.setHex(0x000000));
   };
   resetEnemy();
@@ -447,12 +493,18 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const decalGeo = new THREE.CircleGeometry(0.035, 10);
   const decalMat = new THREE.MeshBasicMaterial({ color: 0x121212, transparent: true, opacity: 0.9 });
   const sparkMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0 });
+  const bloodMat = new THREE.MeshBasicMaterial({ color: 0xa81f1a });
 
   const raycaster = new THREE.Raycaster();
 
-  const spawnSparks = (point: THREE.Vector3, normal: THREE.Vector3, count: number): void => {
+  const spawnSparks = (
+    point: THREE.Vector3,
+    normal: THREE.Vector3,
+    count: number,
+    mat: THREE.Material = sparkMat,
+  ): void => {
     for (let i = 0; i < count; i++) {
-      const m = new THREE.Mesh(new THREE.SphereGeometry(0.012, 5, 4), sparkMat);
+      const m = new THREE.Mesh(new THREE.SphereGeometry(0.012, 5, 4), mat);
       m.position.copy(point);
       const vel = normal
         .clone()
@@ -549,7 +601,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         }
         enemy.materials.forEach((m) => m.emissive.setHex(0x551111));
         window.setTimeout(() => enemy.materials.forEach((m) => m.emissive.setHex(0x000000)), 110);
-        spawnSparks(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0), 6);
+        spawnSparks(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0), 6, bloodMat);
         if (zone === 'head') sfx.headshot();
         else sfx.hit();
         if (enemyAI.hp <= 0) {
@@ -558,7 +610,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
           killsEl.textContent = String(stats.kills);
           sfx.killConfirm(stats.kills);
           showBanner(zone === 'head' ? '爆头击杀' : `击杀（${enemyAI.hp === 0 ? '身体' : ''}）`);
-          spawnSparks(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0), 14);
+          spawnSparks(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0), 14, bloodMat);
           closeEncounter(true);
         }
       } else {
@@ -777,11 +829,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         openEncounter();
       }
     } else if (enemyAI.state === 'walking') {
-      // 先走到门口（z 接近 0 偏移），再横向拉出到随机身位
-      const target =
-        g.position.z < CONFIG.doorZ + 1.2
-          ? new THREE.Vector3(0, 0, CONFIG.doorZ + 1.6)
-          : new THREE.Vector3(enemyAI.peekTargetX, 0, CONFIG.doorZ + 2.1);
+      // 从掩体后走到拉出位（沿路径绕过掩体）
+      const target = enemyAI.peekPos;
       const dir = target.clone().sub(g.position);
       const dist = dir.length();
       if (dist > 0.06) {
@@ -800,9 +849,18 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         enemyAI.timer = CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0]);
         enemy.leftLeg.rotation.x = 0;
         enemy.rightLeg.rotation.x = 0;
+        // 蹲下：整体下沉并轻微压扁（视觉上更矮）
+        if (enemyAI.crouch) {
+          g.scale.set(1, 0.86, 1);
+          g.position.y = -0.06;
+        }
       }
     } else if (enemyAI.state === 'aiming') {
       enemyAI.timer -= dt;
+      // 举枪瞄准姿态：双臂前伸，随瞄准进度抬起
+      enemyAI.aimPose = Math.min(1, enemyAI.aimPose + dt * 3);
+      enemy.leftArm.rotation.x = -1.25 * enemyAI.aimPose;
+      enemy.rightArm.rotation.x = -1.35 * enemyAI.aimPose;
       // 面向玩家
       const toPlayer = new THREE.Vector3(playerPos.x - g.position.x, 0, playerPos.z - g.position.z);
       g.rotation.y = Math.atan2(toPlayer.x, toPlayer.z) + Math.PI;
