@@ -536,7 +536,22 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   });
 
   /* ---------------- Three.js 初始化 ---------------- */
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  // 抗锯齿（MSAA）在弱显卡/软件渲染路径上非常贵：只有高画质才开
+  // powerPreference 请求独显（双显卡笔记本默认可能用核显，这是"配置很好却卡"的常见元凶）
+ const renderer = new THREE.WebGLRenderer({
+   canvas,
+   antialias: qualityLevel === 'high',
+   powerPreference: 'high-performance',
+ });
+  // —— 真实渲染器诊断：浏览器到底用的是显卡，还是 CPU 软件光栅化 ——
+  // （核显/软件渲染是"配置很好却卡"的头号元凶，HUD 会把它显出来）
+  const glCtx = renderer.getContext();
+  const dbgInfo = glCtx.getExtension('WEBGL_debug_renderer_info');
+  const gpuName = String(
+    dbgInfo ? glCtx.getParameter(dbgInfo.UNMASKED_RENDERER_WEBGL) : glCtx.getParameter(glCtx.RENDERER),
+  );
+  const gpuIsSoftware = /swiftshader|software|basic render|llvmpipe|microsoft basic/i.test(gpuName);
+
   // 性能关键点①：像素比。高 DPI 屏上 2× 像素比 = 4 倍像素填充，是"卡"的头号原因
   renderer.setPixelRatio(1);
   // 阴影在初始化时一次决定：运行中切换会触发全材质着色器重编译（表现为"画面卡住"）
@@ -1027,6 +1042,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       longFrames,
       maxFrameMs: +maxFrameMs.toFixed(1),
       loopError,
+      gpu: gpuName,
+      gpuSoftware: gpuIsSoftware,
+      antialias: qualityLevel === 'high',
     }),
     resetMaxFrame: () => {
       maxFrameMs = 0;
@@ -1560,6 +1578,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       await loadSession(Math.min(sessionTarget, 24));
       loadingOverlay.classList.add('hidden');
       resetSessionStats();
+      if (gpuIsSoftware) {
+        showBanner('检测到软件渲染（未使用显卡）→ 请在浏览器开启硬件加速');
+      }
       running = true;
       lastT = performance.now();
       canvas.requestPointerLock();
@@ -1916,6 +1937,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         `${fps.toFixed(0)} FPS · ${(1000 / Math.max(1, fps)).toFixed(1)} ms · ` +
         `${info.calls} draws · ${(info.triangles / 1000).toFixed(1)}k tri · ` +
         `dpr ${renderer.getPixelRatio().toFixed(2)} · 画质 ${qualityLevel === 'low' ? '低' : qualityLevel === 'medium' ? '中' : '高'}` +
+        `\nGPU: ${gpuName}` +
+        (gpuIsSoftware ? ' ⚠ 软件渲染（未用显卡）' : '') +
         (longFrames > 0 ? ` · 长卡 ${longFrames}` : '') +
         (loopError ? ` · 异常：${loopError}` : '');
       if (autoQuality && running) {
