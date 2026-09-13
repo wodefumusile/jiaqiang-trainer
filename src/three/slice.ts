@@ -87,8 +87,9 @@ function buildRifle(): THREE.Group {
   add(gun, new THREE.BoxGeometry(0.1, 0.14, 0.46), matPoly, 0, 0, -0.2);
   // 顶部导轨
   add(gun, new THREE.BoxGeometry(0.06, 0.03, 0.5), matPoly, 0, 0.09, -0.22);
-  // 拉机柄
-  add(gun, new THREE.BoxGeometry(0.07, 0.02, 0.06), matMetal, 0.06, 0.06, -0.06);
+  // 拉机柄（换弹动画会拉动它）
+  const charging = add(gun, new THREE.BoxGeometry(0.07, 0.02, 0.06), matMetal, 0.06, 0.06, -0.06);
+  charging.name = 'charging';
   // 护木
   add(gun, new THREE.BoxGeometry(0.09, 0.1, 0.44), matWood, 0, -0.01, -0.66);
   // 枪管
@@ -100,6 +101,7 @@ function buildRifle(): THREE.Group {
   // 弹匣（前倾）
   const mag = add(gun, new THREE.BoxGeometry(0.07, 0.26, 0.12), matPoly, 0, -0.2, -0.18);
   mag.rotation.x = -0.22;
+  mag.name = 'mag';
   // 握把
   const grip = add(gun, new THREE.BoxGeometry(0.06, 0.18, 0.09), matPoly, 0, -0.17, 0.02);
   grip.rotation.x = 0.28;
@@ -393,6 +395,13 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   camera.add(rifle);
   scene.add(camera);
 
+  // 换弹动画要单独驱动的部件（记录基准变换，动画只做偏移）
+  const magPart = rifle.getObjectByName('mag') as THREE.Mesh;
+  const chargingPart = rifle.getObjectByName('charging') as THREE.Mesh;
+  const magBase = magPart.position.clone();
+  const magBaseRotX = magPart.rotation.x;
+  const chargingBase = chargingPart.position.clone();
+
   // 枪口火光
   const flash = new THREE.PointLight(0xffd27a, 0, 6, 2);
   flash.position.set(0, 0.01, -1.58);
@@ -464,6 +473,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     ai: enemyAI,
     aimAt: debugAim,
     getBurst: () => burst,
+    rifle,
+    parts: { mag: magPart, charging: chargingPart },
+    reloadState: () => ({ reloading, magY: +magPart.position.y.toFixed(3), chargeZ: +chargingPart.position.z.toFixed(3) }),
   };
 
   /* ---------------- 输入与射击 ---------------- */
@@ -475,6 +487,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   let ammo = RIFLE.magSize;
   let reloading = false;
   let reloadEnd = 0;
+  let reloadStartAt = 0;
   let burst = 0;
   let lastShot = 0;
   let recoil = 0;
@@ -627,7 +640,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const startReload = (): void => {
     if (reloading) return;
     reloading = true;
-    reloadEnd = performance.now() + RIFLE.reloadMs;
+    reloadStartAt = performance.now();
+    reloadEnd = reloadStartAt + RIFLE.reloadMs;
+    ammoEl.textContent = '换弹中';
     sfx.reloadStart();
   };
 
@@ -808,8 +823,49 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     // —— 步枪后坐力与摆动 ——
     recoil = Math.max(0, recoil - dt * 6.5);
     const sway = -playerVel.x * 0.012;
-    rifle.position.set(0.16 + sway, -0.17 + recoil * 0.03, -0.34 + recoil * 0.085);
-    rifle.rotation.set(recoil * 0.16, 0.04 + sway * 0.5, recoil * 0.05);
+
+    // —— 换弹动画（只做表现，不改变 2.5 秒的换弹时长与数值）——
+    // t: 0→1 时间轴；分四段：压枪 → 卸匣 → 装匣 → 拉栓复位
+    let reloadDip = 0;
+    let magDrop = 0;
+    let magTilt = 0;
+    let chargingPull = 0;
+    if (reloading) {
+      const t = Math.min(1, (now - reloadStartAt) / RIFLE.reloadMs);
+      // 压枪：前 25% 下沉，末 25% 抬起
+      reloadDip = t < 0.25 ? t / 0.25 : t > 0.75 ? (1 - t) / 0.25 : 1;
+      // 卸匣（20%-45%）→ 空档 → 装匣（55%-80%）
+      if (t >= 0.2 && t < 0.45) {
+        const k = (t - 0.2) / 0.25;
+        magDrop = -0.55 * k;
+        magTilt = 1.1 * k;
+      } else if (t >= 0.45 && t < 0.55) {
+        magDrop = -0.55;
+        magTilt = 1.1;
+      } else if (t >= 0.55 && t < 0.8) {
+        const k = (t - 0.55) / 0.25;
+        magDrop = -0.55 * (1 - k);
+        magTilt = 1.1 * (1 - k);
+      }
+      // 拉栓（80%-95%）：一次往返
+      if (t >= 0.8 && t < 0.95) {
+        chargingPull = Math.sin(((t - 0.8) / 0.15) * Math.PI) * 0.085;
+      }
+    }
+    magPart.position.set(magBase.x, magBase.y + magDrop, magBase.z);
+    magPart.rotation.x = magBaseRotX + magTilt;
+    chargingPart.position.set(chargingBase.x, chargingBase.y, chargingBase.z - chargingPull);
+
+    rifle.position.set(
+      0.16 + sway,
+      -0.17 + recoil * 0.03 + reloadDip * -0.14,
+      -0.34 + recoil * 0.085 + reloadDip * 0.02,
+    );
+    rifle.rotation.set(
+      recoil * 0.16 + reloadDip * 0.34,
+      0.04 + sway * 0.5,
+      recoil * 0.05 - reloadDip * 0.16,
+    );
     flash.intensity = Math.max(0, flash.intensity - dt * 90);
     flashMesh.material.opacity = Math.max(0, flashMesh.material.opacity - dt * 12);
 
