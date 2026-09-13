@@ -427,7 +427,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
             <span>显示</span>
             <button class="btn-ghost btn-sm" id="s3-fullscreen">全屏（F）</button>
           </div>
-          <div class="s3-cover-toggle">
+          <div class="s3-cover-toggle" id="s3-count-row">
             <span>本局敌人数量</span>
             <button class="btn-ghost btn-sm" data-count="5">5</button>
             <button class="btn-ghost btn-sm" data-count="10">10</button>
@@ -435,7 +435,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
             <button class="btn-ghost btn-sm" data-count="999">不限</button>
           </div>
           <button class="btn-primary btn-lg" id="s3-start">点击进入</button>
+          <button class="btn-ghost" id="s3-bench">性能自检</button>
           <button class="btn-ghost" id="s3-quit">返回 2D 版</button>
+          <div class="s3-bench-out" id="s3-bench-out"></div>
         </div>
       </div>
       <div class="overlay hidden" id="s3-loading">
@@ -480,7 +482,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const scoreEl = container.querySelector<HTMLElement>('#s3-score')!;
   const againBtn = container.querySelector<HTMLButtonElement>('#s3-again')!;
   const backBtn = container.querySelector<HTMLButtonElement>('#s3-back')!;
-  const countRow = container.querySelector<HTMLElement>('.s3-cover-toggle:last-of-type')!;
+  // 注意：这里必须用 id 精确定位——用 :last-of-type 之类的结构选择器一旦失配，
+  // 会在挂载阶段抛异常导致整个应用起不来（曾经的真实 Bug）
+  const countRow = container.querySelector<HTMLElement>('#s3-count-row');
+  const benchBtn = container.querySelector<HTMLButtonElement>('#s3-bench')!;
+  const benchOut = container.querySelector<HTMLElement>('#s3-bench-out')!;
 
   /** 本局敌人数量（玩家开局前可选），999 = 不限 */
   let sessionTarget = Number(localStorage.getItem('jg.slice3d.count') ?? '10') || 10;
@@ -490,7 +496,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     });
   };
   refreshCountButtons();
-  countRow.querySelectorAll<HTMLButtonElement>('[data-count]').forEach((b) => {
+  countRow?.querySelectorAll<HTMLButtonElement>('[data-count]').forEach((b) => {
     b.addEventListener('click', () => {
       sessionTarget = Number(b.dataset.count) ?? 10;
       localStorage.setItem('jg.slice3d.count', String(sessionTarget));
@@ -1152,6 +1158,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   let maxFrameMs = 0;
   /** 本局是否已结算（结算后停止生成敌人） */
   let sessionOver = false;
+  /** 性能自检模式：收集每帧耗时（毫秒） */
+  let benchMode = false;
+  let benchSamples: number[] = [];
 
   const stats = { shots: 0, hits: 0, kills: 0, deaths: 0, startedEpoch: Date.now(), startedPerf: performance.now() };
   // 本局统计（用于结算成绩）
@@ -1614,6 +1623,48 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
 
   container.querySelector<HTMLButtonElement>('#s3-start')!.addEventListener('click', start);
+  /**
+   * 性能自检：把场景真实渲染 3 秒，输出帧率与帧时间分布。
+   * 这是唯一能在主人机器上直接给出"到底跑不跑得动"的数字的办法。
+   */
+  benchBtn.addEventListener('click', () => {
+    void (async () => {
+      benchOut.innerHTML = '采样中…（3 秒，请勿操作）';
+      overlay.classList.add('hidden');
+      await nextFrame();
+      // 预热：先渲染 20 帧，排除首帧编译影响
+      for (let i = 0; i < 20; i++) await nextFrame();
+      benchSamples = [];
+      benchMode = true;
+      const t0 = performance.now();
+      while (performance.now() - t0 < 3000) await nextFrame();
+      benchMode = false;
+      overlay.classList.remove('hidden');
+
+      const s = benchSamples.slice().sort((a, b) => a - b);
+      const pct = (p: number): number => s[Math.min(s.length - 1, Math.floor(s.length * p))] ?? 0;
+      const avg = s.reduce((a, b) => a + b, 0) / Math.max(1, s.length);
+      const p95 = pct(0.95);
+      const worst = s[s.length - 1] ?? 0;
+      const verdict =
+        p95 <= 20
+          ? '✅ 机器完全跑得动（60 FPS 级）'
+          : p95 <= 33
+            ? '⚠️ 基本流畅，偶有掉帧'
+            : '❌ 渲染吃力（核显/软件渲染，或窗口分辨率过大）';
+      const buf = renderer.domElement;
+      benchOut.innerHTML = `
+        <div class="s3-score-row"><span>版本</span><b>${BUILD_STAMP}</b></div>
+        <div class="s3-score-row"><span>渲染器</span><b>${gpuName}</b></div>
+        <div class="s3-score-row"><span>帧率</span><b>${(1000 / Math.max(0.01, avg)).toFixed(1)} FPS（均值）</b></div>
+        <div class="s3-score-row"><span>帧时间 平均/P95/最差</span><b>${avg.toFixed(1)} / ${p95.toFixed(1)} / ${worst.toFixed(1)} ms</b></div>
+        <div class="s3-score-row"><span>渲染缓冲</span><b>${buf.width} × ${buf.height}</b></div>
+        <div class="s3-score-row"><span>窗口 / DPR</span><b>${window.innerWidth}×${window.innerHeight} / ${window.devicePixelRatio}</b></div>
+        <div class="s3-score-row"><span>画质</span><b>${qualityLevel === 'low' ? '低' : qualityLevel === 'medium' ? '中' : '高'}</b></div>
+        <div class="s3-score-row"><span>结论</span><b>${verdict}</b></div>
+      `;
+    })();
+  });
   fullscreenBtn.addEventListener('click', () => void toggleFullscreen());
   coverOnBtn.addEventListener('click', () => {
     coverState.on = true;
@@ -1666,6 +1717,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     // 卡顿统计：单帧超过 400ms 记为一次长卡（用于判断是"持续低帧"还是"周期性卡死"）
     if (dt > 0.4) longFrames++;
     if (dt * 1000 > maxFrameMs) maxFrameMs = dt * 1000;
+    if (benchMode) benchSamples.push(dt * 1000);
     if (!running) return;
 
     // —— 视角 ——

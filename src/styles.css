@@ -396,3 +396,22 @@ body.s3-hurt::after {
   gap: 12px;
   justify-content: center;
 }
+
+/* 性能自检输出 */
+.s3-bench-out {
+  margin-top: 14px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.s3-bench-out .s3-score-row {
+  padding: 5px 2px;
+  font-size: 12px;
+  gap: 12px;
+}
+
+.s3-bench-out .s3-score-row b {
+  color: var(--accent);
+  word-break: break-word;
+  text-align: right;
+}
