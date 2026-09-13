@@ -385,6 +385,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
               (d) => `<button class="btn-ghost btn-sm" data-diff="${d.id}">${d.name}</button>`,
             ).join('')}
           </div>
+          <div class="s3-cover-toggle">
+            <span>显示</span>
+            <button class="btn-ghost btn-sm" id="s3-fullscreen">全屏（F）</button>
+          </div>
           <button class="btn-primary btn-lg" id="s3-start">点击进入</button>
           <button class="btn-ghost" id="s3-quit">返回 2D 版</button>
         </div>
@@ -403,6 +407,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const coverOnBtn = container.querySelector<HTMLButtonElement>('#s3-cover-on')!;
   const coverOffBtn = container.querySelector<HTMLButtonElement>('#s3-cover-off')!;
   const diffRow = container.querySelector<HTMLElement>('#s3-diff-row')!;
+  const fullscreenBtn = container.querySelector<HTMLButtonElement>('#s3-fullscreen')!;
 
   /* ---------------- 难度（需求①：影响战术丰富度） ---------------- */
   const DIFF_KEY = 'jg.slice3d.diff';
@@ -466,25 +471,26 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const rebuildColliders = (): void => {
     colliders = room.walls.map((m) => new THREE.Box3().setFromObject(m));
   };
-  /** 把圆柱体（半径 radius）推出所有碰撞盒；返回是否发生过碰撞 */
-  const resolveXZ = (pos: THREE.Vector3, radius: number): boolean => {
-    let hit = false;
+  /** 把圆柱体（半径 radius）推出所有碰撞盒；返回累计推出向量（供"沿面滑动"使用） */
+  const resolveXZ = (pos: THREE.Vector3, radius: number): THREE.Vector3 => {
+    const pushAccum = new THREE.Vector3();
     for (const box of colliders) {
       // 只考虑与身体高度重叠的碰撞盒：
       // 否则门楣（2.3~3.2m 高）会把门洞"封死"，敌人被卡在门口出不来
       if (box.min.y > CONFIG.eyeHeight + 0.15 || box.max.y < 0.05) continue;
       const cx = Math.max(box.min.x, Math.min(pos.x, box.max.x));
       const cz = Math.max(box.min.z, Math.min(pos.z, box.max.z));
-      let dx = pos.x - cx;
-      let dz = pos.z - cz;
+      const dx = pos.x - cx;
+      const dz = pos.z - cz;
       const d2 = dx * dx + dz * dz;
       if (d2 > radius * radius) continue;
-      hit = true;
       if (d2 > 1e-6) {
         const d = Math.sqrt(d2);
-        const push = (radius - d) / d;
-        pos.x += dx * push;
-        pos.z += dz * push;
+        const k = (radius - d) / d;
+        pos.x += dx * k;
+        pos.z += dz * k;
+        pushAccum.x += dx * k;
+        pushAccum.z += dz * k;
       } else {
         // 圆心已在盒内：沿最小穿透轴推出
         const toMinX = pos.x - box.min.x;
@@ -492,13 +498,22 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         const toMinZ = pos.z - box.min.z;
         const toMaxZ = box.max.z - pos.z;
         const minPen = Math.min(toMinX, toMaxX, toMinZ, toMaxZ);
-        if (minPen === toMinX) pos.x = box.min.x - radius;
-        else if (minPen === toMaxX) pos.x = box.max.x + radius;
-        else if (minPen === toMinZ) pos.z = box.min.z - radius;
-        else pos.z = box.max.z + radius;
+        if (minPen === toMinX) {
+          pushAccum.x -= box.min.x - radius - pos.x;
+          pos.x = box.min.x - radius;
+        } else if (minPen === toMaxX) {
+          pushAccum.x += box.max.x + radius - pos.x;
+          pos.x = box.max.x + radius;
+        } else if (minPen === toMinZ) {
+          pushAccum.z -= box.min.z - radius - pos.z;
+          pos.z = box.min.z - radius;
+        } else {
+          pushAccum.z += box.max.z + radius - pos.z;
+          pos.z = box.max.z + radius;
+        }
       }
     }
-    return hit;
+    return pushAccum;
   };
   /** 找到离给定点最近的掩体碰撞盒（用于把刷新点放到掩体背面外侧） */
   const nearestCollider = (x: number, z: number): THREE.Box3 | null => {
@@ -579,6 +594,84 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     losRay.set(from, dir.normalize());
     losRay.far = dist;
     return losRay.intersectObjects(playerCoverMeshes, false).length === 0;
+  };
+
+  /* ---------------- 敌人移动模型（更正版） ----------------
+   * 目标不是"走向玩家"，而是**把枪线挪到玩家身上**：
+   *   · 以掩体为支点做横向侧步，找到"能看到玩家"的位置
+   *   · 全程身体与枪口朝玩家（不是朝移动方向）
+   *   · 撞到实体沿面滑动，卡住则换下一个候选枪线位 */
+  const enemyLineClear = (x: number, z: number): boolean => {
+    const from = new THREE.Vector3(x, 1.5, z);
+    const to = camera.position.clone();
+    const dir = to.clone().sub(from);
+    const dd = dir.length();
+    losRay.set(from, dir.normalize());
+    losRay.far = dd;
+    return losRay.intersectObjects(room.walls, false).length === 0;
+  };
+  const facePlayer = (): void => {
+    const g = enemy.group;
+    const dx = camera.position.x - g.position.x;
+    const dz = camera.position.z - g.position.z;
+    if (Math.hypot(dx, dz) < 0.05) return;
+    g.rotation.y = Math.atan2(dx, dz) + Math.PI;
+  };
+  /** 走向某点：带碰撞滑动；返回是否已到达。全程朝玩家 + 走路动画 */
+  const moveEnemyTo = (target: THREE.Vector3, speed: number, dt: number): boolean => {
+    const g = enemy.group;
+    const dir = new THREE.Vector3(target.x - g.position.x, 0, target.z - g.position.z);
+    const dist = dir.length();
+    if (dist < 0.15) return true;
+    dir.normalize();
+    g.position.addScaledVector(dir, speed * dt);
+    const push = resolveXZ(g.position, 0.4);
+    if (push.lengthSq() > 1e-6) {
+      const n = push.clone().normalize();
+      const tang = dir.clone().sub(n.clone().multiplyScalar(dir.dot(n)));
+      if (tang.lengthSq() > 1e-6) g.position.addScaledVector(tang.normalize(), speed * dt * 0.85);
+    }
+    facePlayer();
+    enemyAI.walkPhase += dt * 7;
+    const swing = Math.sin(enemyAI.walkPhase) * 0.5;
+    enemy.leftLeg.rotation.x = swing;
+    enemy.rightLeg.rotation.x = -swing;
+    enemy.leftArm.rotation.x = -swing * 0.5;
+    enemy.rightArm.rotation.x = swing * 0.5;
+    if (!enemyAI.crouch && g.scale.y < 1) {
+      g.scale.y = Math.min(1, g.scale.y + dt * 2.2);
+      g.position.y = -0.06 * (1 - g.scale.y) / 0.14;
+    }
+    return false;
+  };
+  /** 找"枪线位"：沿掩体两侧横移取样，挑能看见玩家且横移最短的点 */
+  const findFiringSpot = (): THREE.Vector3 => {
+    const g = enemy.group;
+    const box = nearestCollider(g.position.x, g.position.z);
+    const base = box ? box.getCenter(new THREE.Vector3()) : g.position.clone();
+    const halfX = box ? (box.max.x - box.min.x) / 2 : 0.6;
+    const candidates: THREE.Vector3[] = [];
+    for (const sx of [-1, 1]) {
+      for (const d of [0.7, 1.2, 1.8]) {
+        candidates.push(new THREE.Vector3(base.x + sx * (halfX + d), 0, g.position.z));
+      }
+    }
+    // 允许向玩家方向少量探出（≤1m），但绝不贴身
+    const toward = new THREE.Vector3(
+      camera.position.x - g.position.x,
+      0,
+      camera.position.z - g.position.z,
+    ).normalize();
+    candidates.push(g.position.clone().addScaledVector(toward, 1.0));
+    const usable = candidates.filter(
+      (c) =>
+        enemyLineClear(c.x, c.z) &&
+        resolveXZ(c.clone(), 0.42).lengthSq() < 1e-6 &&
+        !enemyAI.badSpots.some((b) => b.distanceTo(c) < 0.7),
+    );
+    const pool = usable.length > 0 ? usable : candidates;
+    pool.sort((a, b) => a.distanceTo(g.position) - b.distanceTo(g.position));
+    return pool[0];
   };
 
   /* -------- 需求①：刷新必须在玩家视线之外（被掩体挡住）且离玩家足够远 -------- */
@@ -674,6 +767,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     coverPos: new THREE.Vector3(),
     waypoint: null as THREE.Vector3 | null,
     path: [] as THREE.Vector3[],
+    firingSpot: null as THREE.Vector3 | null,
+    badSpots: [] as THREE.Vector3[],
+    stallT: 0,
     counters: { feints: 0, coverChanges: 0 },
     dieProgress: 0,
     walkPhase: 0,
@@ -740,6 +836,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       }
     }
     enemyAI.path = path;
+    enemyAI.firingSpot = null;
+    enemyAI.badSpots = [];
+    enemyAI.stallT = 0;
     enemyAI.dieProgress = 0;
     enemy.group.visible = true;
     enemy.group.position.set(spawnX, 0, spawnZ);
@@ -790,6 +889,35 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     }),
     deaths: () => stats.deaths,
     decals: () => decals.length,
+    /** 穿模自检：敌人中心是否嵌入任何实体碰撞盒（半径 0.4 的 60% 容差） */
+    enemyClipCheck: () => {
+      const g = enemy.group.position;
+      for (const b of colliders) {
+        if (b.min.y > CONFIG.eyeHeight + 0.15 || b.max.y < 0.05) continue;
+        const cx = Math.max(b.min.x, Math.min(g.x, b.max.x));
+        const cz = Math.max(b.min.z, Math.min(g.z, b.max.z));
+        if ((g.x - cx) ** 2 + (g.z - cz) ** 2 < (0.4 * 0.6) ** 2) return true;
+      }
+      return false;
+    },
+    enemyInfo: () => {
+      const g = enemy.group;
+      const dx = camera.position.x - g.position.x;
+      const dz = camera.position.z - g.position.z;
+      const dist = Math.hypot(dx, dz);
+      // 朝向玩家程度：模型正面为本地 -Z
+      const fwdX = -Math.sin(g.rotation.y);
+      const fwdZ = -Math.cos(g.rotation.y);
+      const facing = dist > 0.05 ? (fwdX * (dx / dist) + fwdZ * (dz / dist)) : 1;
+      return {
+        state: enemyAI.state,
+        x: +g.position.x.toFixed(2),
+        z: +g.position.z.toFixed(2),
+        distance: +dist.toFixed(2),
+        facingPlayer: +facing.toFixed(2),
+        lineClear: enemyLineClear(g.position.x, g.position.z),
+      };
+    },
     probe: (x: number, y: number, z: number) => {
       const from = camera.position.clone();
       const target = new THREE.Vector3(x, y, z);
@@ -1041,6 +1169,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const onKeyDown = (e: KeyboardEvent): void => {
     keys.add(e.code);
     if (e.code === 'KeyR') startReload();
+    // F：网页内全屏（浏览器全屏 API，作用于 3D 容器）
+    if (e.code === 'KeyF') void toggleFullscreen();
     // C：随时切换玩家掩体（有掩体 / 空旷场地）
     if (e.code === 'KeyC') {
       coverState.on = !coverState.on;
@@ -1079,7 +1209,24 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   };
+  const fsRoot = container.querySelector<HTMLElement>('.slice3d') ?? container;
+  /** 网页内全屏：对整个 3D 容器调用全屏 API（不依赖浏览器菜单） */
+  const toggleFullscreen = async (): Promise<void> => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await fsRoot.requestFullscreen();
+      }
+    } catch {
+      showBanner('当前环境不支持全屏');
+    }
+  };
   window.addEventListener('resize', resize);
+  document.addEventListener('fullscreenchange', resize);
+  // 容器尺寸变化也同步（例如进入全屏、布局变化）
+  const ro = new ResizeObserver(() => resize());
+  ro.observe(container);
   resize();
 
   const start = (): void => {
@@ -1116,6 +1263,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
 
   container.querySelector<HTMLButtonElement>('#s3-start')!.addEventListener('click', start);
+  fullscreenBtn.addEventListener('click', () => void toggleFullscreen());
   coverOnBtn.addEventListener('click', () => {
     coverState.on = true;
     applyCoverSetting();
@@ -1168,7 +1316,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     camera.position.set(playerPos.x, eye + Math.sin(now * 0.002) * 0.006, playerPos.z);
     camera.position.y += (eye - camera.position.y) * Math.min(1, dt * 10);
     // 实体碰撞：玩家撞不过掩体/墙体（半径 0.38m）
-    if (resolveXZ(playerPos, 0.38)) {
+    if (resolveXZ(playerPos, 0.38).lengthSq() > 1e-6) {
       playerVel.multiplyScalar(0.35); // 撞墙后减速，避免贴墙抖动
       camera.position.x = playerPos.x;
       camera.position.z = playerPos.z;
@@ -1289,39 +1437,32 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         enemyAI.state = 'walking';
       }
     } else if (enemyAI.state === 'walking') {
-      // 从掩体后走到拉出位（沿路径绕过掩体）
-      const target = enemyAI.path.length > 0 ? enemyAI.path[0] : enemyAI.peekPos;
-      const dir = target.clone().sub(g.position);
-      const dist = dir.length();
-      if (dist > 0.06) {
-        dir.normalize();
-        g.position.addScaledVector(dir, CONFIG.enemySpeed * enemyAI.speedJitter * dt);
-        // 离开掩体开始拉出时起身（除非本波战术要求保持蹲姿）
-        if (!enemyAI.crouch) {
-          if (g.scale.y < 1) {
-            g.scale.y = Math.min(1, g.scale.y + dt * 2.2);
-            g.position.y = -0.06 * (1 - g.scale.y) / 0.14;
-          }
-        }
-        g.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI;
-        enemyAI.walkPhase += dt * 7;
-        const swing = Math.sin(enemyAI.walkPhase) * 0.55;
-        enemy.leftLeg.rotation.x = swing;
-        enemy.rightLeg.rotation.x = -swing;
-        enemy.leftArm.rotation.x = -swing * 0.6;
-        enemy.rightArm.rotation.x = swing * 0.6;
-        g.position.y = Math.abs(Math.sin(enemyAI.walkPhase)) * 0.035;
-      } else {
-        if (enemyAI.path.length > 0) {
-          // 到达中转点后继续走下一个点（先绕掩体，再拉出）
-          enemyAI.path.shift();
-          return;
-        }
+      // 移动目标 = 把枪线挪到玩家身上（不是走到玩家身边）
+      const speed = CONFIG.enemySpeed * enemyAI.speedJitter;
+      // 1) 门后刷新：先穿门洞（中转点）
+      if (enemyAI.path.length > 0) {
+        if (moveEnemyTo(enemyAI.path[0], speed, dt)) enemyAI.path.shift();
+        return;
+      }
+      // 2) 横向侧步到"能看见玩家"的枪线位
+      if (!enemyAI.firingSpot) enemyAI.firingSpot = findFiringSpot();
+      const lastDist = enemyAI.firingSpot.distanceTo(g.position);
+      const arrived = moveEnemyTo(enemyAI.firingSpot, speed, dt);
+      const newDist = enemyAI.firingSpot.distanceTo(g.position);
+      // 卡住检测：1.2 秒没有进展 → 换一个候选枪线位
+      enemyAI.stallT = newDist < lastDist - 0.02 ? 0 : enemyAI.stallT + dt;
+      if (enemyAI.stallT > 1.2) {
+        enemyAI.badSpots.push(enemyAI.firingSpot.clone());
+        enemyAI.firingSpot = findFiringSpot();
+        enemyAI.stallT = 0;
+      }
+      // 枪线已覆盖玩家（或已到位）→ 停下开火
+      if (arrived || enemyLineClear(g.position.x, g.position.z)) {
         enemyAI.state = 'aiming';
         enemyAI.timer = CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0]);
         enemy.leftLeg.rotation.x = 0;
         enemy.rightLeg.rotation.x = 0;
-        // 蹲下：整体下沉并轻微压扁（视觉上更矮）
+        facePlayer();
         if (enemyAI.crouch) {
           g.scale.set(1, 0.86, 1);
           g.position.y = -0.06;
@@ -1417,6 +1558,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   return () => {
     cancelAnimationFrame(rafId);
     running = false;
+    ro.disconnect();
+    document.removeEventListener('fullscreenchange', resize);
     document.removeEventListener('keydown', onKeyDown);
     document.removeEventListener('keyup', onKeyUp);
     document.removeEventListener('mousemove', onMouseMove);
