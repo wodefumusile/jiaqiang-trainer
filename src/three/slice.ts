@@ -21,6 +21,9 @@ import { summarizeSession } from '../stats/metrics';
 import { pushSession } from '../state/appStore';
 import type { EncounterRecord, ShotRecord } from '../types';
 
+/** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
+const BUILD_STAMP = 'v3d-0.4';
+
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
   /** 站姿眼高（米） */
@@ -390,6 +393,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       <canvas id="c3d"></canvas>
       <div class="s3-hud s3-left">
         <div class="s3-title">3D 试验版 · 垂直切片</div>
+        <div class="s3-line">版本 ${BUILD_STAMP}</div>
         <div class="s3-line">鼠标转视角 · WASD 移动 · Ctrl 下蹲</div>
         <div class="s3-line">按住左键连发 · R 换弹 · Esc 退出</div>
         <div class="s3-line">F 全屏 · C 掩体 · F1-F3 画质</div>
