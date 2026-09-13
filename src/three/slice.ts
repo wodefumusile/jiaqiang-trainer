@@ -22,7 +22,7 @@ import { pushSession } from '../state/appStore';
 import type { EncounterRecord, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-0.7';
+const BUILD_STAMP = 'v3d-0.8';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -101,20 +101,73 @@ function makeMat(params: {
 }
 
 /**
- * 难度 → 战术动作表（需求①）
- * peek：拉出身位范围（米）｜crouch：蹲下概率｜feint：假动作（先探再缩再出）
- * strafeShoot：拉出后横向移动射击｜coverChange：中途换掩体｜jitter：速度随机抖动比例
+ * 难度 → 战术动作表（需求① / 需求⑦：敌人的基本行动模式要像 FPS 高手）
+ *
+ * peekSet    ：本次拉出的**身位**候选（米）。0.5 / 1.0 / 1.6 / 2.4 ≈
+ *              半个身位 / 一个身位 / 一个半身位 / 一大段身位。
+ *              低难度只敢小身位，高难度才会大身位横拉（wide swing）。
+ * crouch     ：拉到位置后直接蹲着架枪的概率
+ * feint      ：假动作 jiggle peek（探一下 → 缩回 → 再真正拉出）
+ * feintDouble：双段假动作（探-缩-探-缩-再拉），最高难度专属
+ * strafeShoot：架枪时横向移动射击（高手对枪不会站着给你打）
+ * strafePause：横移中随机插急停的概率（counter-strafe 节奏）
+ * crouchSpam ：对枪过程中蹲起的权重（头位忽高忽低，爆头预瞄失效）
+ * repeatPeek ：被子弹擦过 / 被打中后缩回掩体换身位再拉（re-peek）
+ * wideBias   ：拉出时直接选最大身位的概率（越大越爱大身位横拉）
+ * paceHold   ："长架"节奏概率（先架稳再动，不急着出手）
+ * paceRush   ："秒拉"节奏概率（peek 完立刻开枪，抢你的反应）
+ * lead       ：枪线提前量（秒）——预瞄玩家横向移动的提前点
+ * coverChange：中途换掩体｜jitter：移动速度随机抖动比例
  */
 const TACTICS: Record<
   string,
-  { peek: [number, number]; crouch: number; feint: boolean; strafeShoot: boolean; coverChange: boolean; jitter: number }
+  {
+    peekSet: number[];
+    crouch: number;
+    feint: boolean;
+    feintDouble: boolean;
+    strafeShoot: boolean;
+    strafePause: number;
+    crouchSpam: number;
+    repeatPeek: boolean;
+    wideBias: number;
+    paceHold: number;
+    paceRush: number;
+    lead: number;
+    coverChange: boolean;
+    jitter: number;
+  }
 > = {
-  easy: { peek: [0.6, 1.0], crouch: 0.15, feint: false, strafeShoot: false, coverChange: false, jitter: 0 },
-  normal: { peek: [0.5, 2.4], crouch: 0.25, feint: false, strafeShoot: false, coverChange: false, jitter: 0.1 },
-  hard: { peek: [0.5, 2.4], crouch: 0.4, feint: false, strafeShoot: false, coverChange: false, jitter: 0.2 },
-  insane: { peek: [0.8, 2.6], crouch: 0.45, feint: true, strafeShoot: false, coverChange: true, jitter: 0.3 },
-  master: { peek: [1.0, 2.8], crouch: 0.5, feint: true, strafeShoot: true, coverChange: true, jitter: 0.45 },
-  extreme: { peek: [1.2, 3.2], crouch: 0.55, feint: true, strafeShoot: true, coverChange: true, jitter: 0.65 },
+  easy: {
+    peekSet: [0.5, 1.0], crouch: 0.15, feint: false, feintDouble: false, strafeShoot: false,
+    strafePause: 0, crouchSpam: 0, repeatPeek: false, wideBias: 0, paceHold: 0, paceRush: 0,
+    lead: 0.04, coverChange: false, jitter: 0,
+  },
+  normal: {
+    peekSet: [0.5, 1.0], crouch: 0.25, feint: false, feintDouble: false, strafeShoot: false,
+    strafePause: 0, crouchSpam: 0.05, repeatPeek: false, wideBias: 0.1, paceHold: 0.15, paceRush: 0,
+    lead: 0.05, coverChange: false, jitter: 0.1,
+  },
+  hard: {
+    peekSet: [0.5, 1.0, 1.6], crouch: 0.4, feint: true, feintDouble: false, strafeShoot: false,
+    strafePause: 0.1, crouchSpam: 0.15, repeatPeek: true, wideBias: 0.2, paceHold: 0.25, paceRush: 0.2,
+    lead: 0.08, coverChange: false, jitter: 0.2,
+  },
+  insane: {
+    peekSet: [0.5, 1.0, 1.6, 2.4], crouch: 0.45, feint: true, feintDouble: false, strafeShoot: false,
+    strafePause: 0.2, crouchSpam: 0.25, repeatPeek: true, wideBias: 0.3, paceHold: 0.3, paceRush: 0.25,
+    lead: 0.1, coverChange: true, jitter: 0.3,
+  },
+  master: {
+    peekSet: [0.5, 1.0, 1.6, 2.4], crouch: 0.5, feint: true, feintDouble: false, strafeShoot: true,
+    strafePause: 0.35, crouchSpam: 0.4, repeatPeek: true, wideBias: 0.45, paceHold: 0.35, paceRush: 0.3,
+    lead: 0.12, coverChange: true, jitter: 0.45,
+  },
+  extreme: {
+    peekSet: [1.0, 1.6, 2.4], crouch: 0.55, feint: true, feintDouble: true, strafeShoot: true,
+    strafePause: 0.5, crouchSpam: 0.55, repeatPeek: true, wideBias: 0.6, paceHold: 0.4, paceRush: 0.35,
+    lead: 0.14, coverChange: true, jitter: 0.65,
+  },
 };
 
 interface SliceHooks {
@@ -790,8 +843,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
   const facePlayer = (): void => {
     const g = enemy.group;
-    const dx = camera.position.x - g.position.x;
-    const dz = camera.position.z - g.position.z;
+    // 需求⑦-F：预瞄带提前量——枪线指向"玩家接下来会在的位置"，而不是他此刻站的地方。
+    // 你横向移动时最明显（枪口总是稍微提前压着你），停下来的瞬间他就回到你身上。
+    const t = tactics();
+    const lead = playerVel.lengthSq() > 0.16 ? t.lead : 0;
+    const dx = camera.position.x + playerVel.x * lead - g.position.x;
+    const dz = camera.position.z + playerVel.z * lead - g.position.z;
     if (Math.hypot(dx, dz) < 0.05) return;
     g.rotation.y = Math.atan2(dx, dz) + Math.PI;
   };
@@ -951,10 +1008,28 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     strafeShoot: false,
     strafeDir: 1,
     strafeSeconds: 0,
+    /** 本次拉出的身位（米）——从难度表 peekSet 里按档位抽，不是连续随机 */
+    peekOffset: 1.0,
+    /** 下一次横移变向的倒计时（高手对枪不会匀速直线走） */
+    strafeNextChange: 0.4,
+    /** 横移中急停的剩余时间（counter-strafe 节奏） */
+    strafePauseT: 0,
+    /** 急停里等了多久（等太久就不等了，保证一定会开枪） */
+    strafeWaitT: 0,
+    /** 蹲起：这一蹲还要蹲多久 */
+    crouchHold: 0,
+    /** 出手节奏系数：<1 秒拉 / 1 正常 / >1 长架 */
+    paceFactor: 1,
+    /** 本局在这个敌人身上打中的次数（E2 折中：第 1、3 枪后缩回） */
+    bodyHits: 0,
+    /** 同一个身位挨了几次（第三次起强制换大身位横拉） */
+    sameOffsetHits: 0,
     canChangeCover: false,
     feintPlan: false,
     feintPhase: 0,
     feintPos: new THREE.Vector3(),
+    /** 双段假动作第二次探出的位置（极限难度） */
+    feintPos2: new THREE.Vector3(),
     coverPos: new THREE.Vector3(),
     waypoint: null as THREE.Vector3 | null,
     path: [] as THREE.Vector3[],
@@ -963,10 +1038,29 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     stallT: 0,
     /** 跟随路径点时的"无进展计时"（防止敌人被掩体挡住后永远卡在走路状态） */
     pathStallT: 0,
-    counters: { feints: 0, coverChanges: 0 },
+    counters: { feints: 0, coverChanges: 0, repeeks: 0, strafeReversals: 0, crouchToggles: 0, wideSwings: 0 },
     dieProgress: 0,
     walkPhase: 0,
   };
+  /**
+   * 需求⑦-A：抽一个"身位"。
+   * 高手拉枪不是随便挑个距离，而是半个 / 一个 / 一个半 / 一大段身位这种离散档位；
+   * wide=true（假动作之后那一下真正的横拉）时明显偏向最大身位。
+   */
+  const pickPeekOffset = (wide = false): number => {
+    const t = tactics();
+    const set = t.peekSet;
+    if (!set || set.length === 0) return 1.0;
+    if (wide && Math.random() < Math.max(t.wideBias, 0.5)) return set[set.length - 1];
+    return set[Math.floor(Math.random() * set.length)];
+  };
+  /**
+   * 需求⑦-E：玩家这一枪"擦到/打中"敌人的信号——由 shoot() 累加，AI 下一帧消费。
+   * 高手不会原地重复同一个身位等你打第四枪，而是缩回掩体换个角度再来（re-peek）。
+   */
+  let pendingThreat = 0;
+  /** 复用向量：命中判定里算"子弹离身体多近"，避免每次开枪新建对象 */
+  const threatPoint = new THREE.Vector3();
   /** 最近一次刷新的合法性（供自动化验证读取） */
   let lastSpawn = {
     seq: 0,
@@ -991,7 +1085,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     const t = tactics();
     // 需求①：只在视线之外、且离玩家 ≥4 米的位置刷新
     const cover = pickSpawnPoint();
-    const offset = t.peek[0] + Math.random() * Math.max(0, t.peek[1] - t.peek[0]);
+    // 需求⑦-A：身位按档位抽（半个 / 一个 / 一个半 / 一大段）
+    const offset = pickPeekOffset(Math.random() < t.wideBias);
     const side = Math.random() < 0.5 ? -1 : 1;
     enemyAI.state = 'hidden';
     enemyAI.hp = DAMAGE.maxHp;
@@ -1003,8 +1098,20 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     enemyAI.strafeShoot = t.strafeShoot;
     enemyAI.canChangeCover = t.coverChange;
     enemyAI.strafeSeconds = 0;
-    // 高难度：先做一次假动作（小身位探一下再缩回），才真正拉出
-    enemyAI.feintPlan = t.feint && Math.random() < 0.65;
+    enemyAI.peekOffset = offset;
+    enemyAI.strafeNextChange = 0.25 + Math.random() * 0.45;
+    enemyAI.strafePauseT = 0;
+    enemyAI.strafeWaitT = 0;
+    enemyAI.crouchHold = 0;
+    enemyAI.bodyHits = 0;
+    enemyAI.sameOffsetHits = 0;
+    // 需求⑦-G：出手节奏（秒拉 / 正常 / 长架），避免玩家摸到固定节拍
+    const paceRoll = Math.random();
+    enemyAI.paceFactor = paceRoll < t.paceRush ? 0.62 : paceRoll < t.paceRush + t.paceHold ? 1.45 : 1;
+    pendingThreat = 0;
+    // 需求⑦-B：困难起先做假动作（小身位探一下再缩回），才真正拉出；
+    // 极限难度是"双段假动作"，每次都做
+    enemyAI.feintPlan = t.feint && (t.feintDouble || Math.random() < 0.65);
     enemyAI.feintPhase = 0;
     enemyAI.aimPose = 0;
     enemyAI.blocked = 0;
@@ -1019,6 +1126,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     enemyAI.peekTargetX = cover.x + side * offset;
     enemyAI.peekPos.set(enemyAI.peekTargetX, 0, cover.z + toward * (0.9 + Math.random() * 0.8));
     enemyAI.feintPos.set(cover.x + side * 0.35, 0, cover.z + toward * 0.35);
+    // 双段假动作的第二个探出点：更深一点，两次探出的"身位"明显不同
+    enemyAI.feintPos2.set(cover.x + side * 0.6, 0, cover.z + toward * 0.72);
     // 门后刷新：先穿过门洞再拉出（否则会穿墙）
     // 路径规划（关键修复：不能直线穿掩体，否则会被碰撞卡死）
     //  - 门后刷新：先走到门洞中线，再出门口拉出
@@ -1186,7 +1295,17 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         firstHit: hits[0] ? { dist: +hits[0].distance.toFixed(2), far: +dd.toFixed(2) } : null,
       };
     },
-    spawnInfo: () => ({ ...lastSpawn, counters: { ...enemyAI.counters }, strafeSeconds: +enemyAI.strafeSeconds.toFixed(1) }),
+    spawnInfo: () => ({
+      ...lastSpawn,
+      counters: { ...enemyAI.counters },
+      strafeSeconds: +enemyAI.strafeSeconds.toFixed(1),
+      // 需求⑦：给自检脚本读的"战术动作"明细
+      peekOffset: enemyAI.peekOffset,
+      paceFactor: enemyAI.paceFactor,
+      crouchHold: +enemyAI.crouchHold.toFixed(2),
+      bodyHits: enemyAI.bodyHits,
+      coverName: enemyAI.coverName,
+    }),
     setDifficulty: (id: string) => {
       sliceDiff = id;
       localStorage.setItem(DIFF_KEY, id);
@@ -1398,6 +1517,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
             currentEncounter.firstShotHead = zone === 'head';
           }
         }
+        // 需求⑦-E2（折中方案）：身体命中后，**第 1、3 枪**缩回掩体换身位再拉出；
+        // 第 2 枪不缩——留出让你打出第四枪的节奏窗口，否则会变成"永远打不死"。
+        if (zone !== 'head' && enemyAI.hp > 0 && tactics().repeatPeek) {
+          enemyAI.bodyHits++;
+          if (enemyAI.bodyHits === 1 || enemyAI.bodyHits === 3) pendingThreat = 1;
+        }
         flashEnemyMats(0x551111);
         window.setTimeout(() => flashEnemyMats(0x000000), 110);
         spawnSparks(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0), 6, bloodMat);
@@ -1421,6 +1546,13 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         addDecal(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0));
         spawnSparks(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0), 7);
         sfx.miss();
+        // 需求⑦-E1：子弹从他身边 0.9m 内飞过（含打在掩体上擦身而过）→ 他记一次威胁
+        if (tactics().repeatPeek && enemyAI.state !== 'hidden' && enemyAI.state !== 'dead') {
+          threatPoint.set(enemy.group.position.x, enemy.group.position.y + 1.15, enemy.group.position.z);
+          // 必须在他"身前方向"才算擦弹（否则背对着开一枪也会误判）
+          const toEnemy = threatPoint.dot(raycaster.ray.direction) - raycaster.ray.origin.dot(raycaster.ray.direction);
+          if (toEnemy > 0 && raycaster.ray.distanceToPoint(threatPoint) < 0.9) pendingThreat = 1;
+        }
       }
     }
     if (ammo <= 0) startReload();
@@ -2043,6 +2175,36 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     // 包成 IIFE 之后，AI 内部的 return 只退出这一小段 AI 更新，渲染永远不会被跳过。
     void ((): void => {
       const g = enemy.group;
+      // 需求⑦-E：被子弹擦过 / 被打中 → 缩回掩体，换个身位再拉出来（re-peek）
+      if (pendingThreat > 0) {
+        pendingThreat = 0;
+        const tacE = tactics();
+        if (tacE.repeatPeek && enemyAI.state !== 'hidden' && enemyAI.state !== 'dead') {
+          enemyAI.counters.repeeks++;
+          enemyAI.sameOffsetHits++;
+          // 同一个身位被吃过三次 → 不再赌小身位，直接大身位横拉
+          const wide = enemyAI.sameOffsetHits >= 3;
+          enemyAI.peekOffset = pickPeekOffset(wide);
+          if (enemyAI.peekOffset >= Math.max(...tacE.peekSet)) enemyAI.counters.wideSwings++;
+          const curSide = Math.sign(enemyAI.peekTargetX - enemyAI.coverPos.x) || 1;
+          const side = Math.random() < 0.7 ? -curSide : curSide; // 七成概率换另一边
+          const towardPlayer = Math.sign(camera.position.z - enemyAI.coverPos.z) || 1;
+          enemyAI.peekTargetX = enemyAI.coverPos.x + side * enemyAI.peekOffset;
+          enemyAI.peekPos.set(
+            enemyAI.peekTargetX,
+            0,
+            enemyAI.coverPos.z + towardPlayer * (0.9 + Math.random() * 0.8),
+          );
+          enemyAI.firingSpot = new THREE.Vector3(enemyAI.peekTargetX, 0, enemyAI.peekPos.z);
+          enemyAI.badSpots.length = 0;
+          enemyAI.aimPose = 0;
+          enemyAI.strafePauseT = 0;
+          enemyAI.crouchHold = 0;
+          // 先缩回掩体、再拉出新身位（有真实的"缩—再拉"过程，不是原地瞬间换位）
+          enemyAI.path = [enemyAI.coverPos.clone()];
+          enemyAI.state = 'walking';
+        }
+      }
     if (enemyAI.state === 'hidden') {
       enemyAI.timer -= dt;
       if (enemyAI.timer <= 0 && !sessionOver) {
@@ -2051,52 +2213,81 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         openEncounter();
       }
     } else if (enemyAI.state === 'feinting') {
-      // 假动作：小身位探出 → 短暂停顿 → 缩回掩体
-      const target = enemyAI.feintPhase === 0 ? enemyAI.feintPos : enemyAI.coverPos;
-      const dir = target.clone().sub(g.position);
+      // 需求⑦-B：假动作（jiggle peek / shoulder peek）——只骗枪，不开枪
+      //   phase 0：小身位探出（约 0.35m，只露肩）→ phase 1：停一下（这就是骗你开枪的窗口）
+      //   → phase 2：缩回掩体 → （极限难度）phase 3：再探第二次（深度不同）→ 真拉出
+      // 结束后不是简单走回去，而是接一下"大身位横拉"（B2：jiggle → wide swing）
+      const feintT = tactics();
+      if (enemyAI.feintPhase === 1) {
+        // 探出后原地停顿：站着不动就是给你"打空"的
+        enemyAI.timer -= dt;
+        facePlayer();
+        enemy.leftLeg.rotation.x = 0;
+        enemy.rightLeg.rotation.x = 0;
+        if (enemyAI.timer <= 0) enemyAI.feintPhase = 2;
+        return;
+      }
+      const phaseTarget =
+        enemyAI.feintPhase === 3 ? enemyAI.feintPos2 : enemyAI.feintPhase === 0 ? enemyAI.feintPos : enemyAI.coverPos;
+      const dir = phaseTarget.clone().sub(g.position);
       const dist = dir.length();
       if (dist > 0.05) {
         dir.normalize();
-        g.position.addScaledVector(dir, CONFIG.enemySpeed * 1.5 * enemyAI.speedJitter * dt);
+        g.position.addScaledVector(dir, CONFIG.enemySpeed * 1.6 * enemyAI.speedJitter * dt);
         // 注意：敌人的碰撞暂时关闭——严格碰撞会在掩体拐角处把敌人卡死（已实测）。
-        // 玩家侧掩体仍是实体（挡人挡弹）。敌人的正规寻路/侧步将在下一步统一实现。
+        // 玩家侧掩体仍是实体（挡人挡弹）。
         g.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI;
         enemyAI.walkPhase += dt * 9;
         const swing = Math.sin(enemyAI.walkPhase) * 0.5;
         enemy.leftLeg.rotation.x = swing;
         enemy.rightLeg.rotation.x = -swing;
-      } else if (enemyAI.feintPhase === 0) {
-        enemyAI.feintPhase = 1;
-        enemyAI.timer = 0.22; // 探出后短暂停留
-      } else {
-        // 缩回完成：统计一次假动作；高难度有概率直接换掩体再出
-        enemyAI.counters.feints++;
-        if (enemyAI.canChangeCover && Math.random() < 0.45) {
-          const next = pickSpawnPoint();
-          const t = tactics();
-          const side = Math.random() < 0.5 ? -1 : 1;
-          const offset = t.peek[0] + Math.random() * Math.max(0, t.peek[1] - t.peek[0]);
-          enemyAI.coverName = next.id;
-          enemyAI.coverPos.set(next.x, 0, next.z);
-          enemyAI.peekTargetX = next.x + side * offset;
-          enemyAI.peekPos.set(enemyAI.peekTargetX, 0, next.z + 1.1 + Math.random() * 0.9);
-          g.position.set(next.x, 0, next.z);
-          enemyAI.counters.coverChanges++;
-          lastSpawn = {
-            seq: lastSpawn.seq + 1,
-            visible: isVisibleFromPlayer(new THREE.Vector3(next.x, 0, next.z)),
-            distance: +Math.hypot(next.x - camera.position.x, next.z - camera.position.z).toFixed(2),
-            cover: next.id,
-            difficulty: sliceDiff,
-            fallback: next.fallback,
-            cameraY: +camera.position.y.toFixed(2),
-            x: +next.x.toFixed(2),
-            z: +next.z.toFixed(2),
-          };
-        }
-        enemyAI.feintPlan = false;
-        enemyAI.state = 'walking';
+        return;
       }
+      if (enemyAI.feintPhase === 0) {
+        enemyAI.feintPhase = 1;
+        enemyAI.timer = 0.16 + Math.random() * 0.22; // 探出后的停留（骗枪窗口）
+        facePlayer();
+        return;
+      }
+      if (enemyAI.feintPhase === 2 && feintT.feintDouble) {
+        enemyAI.feintPhase = 3; // 极限：再来一次小身位探出
+        return;
+      }
+      // 假动作结束：统计 → （高难度）有概率换掩体 → 转成大身位横拉
+      enemyAI.counters.feints++;
+      if (enemyAI.canChangeCover && Math.random() < 0.45) {
+        const next = pickSpawnPoint();
+        // 需求⑦-H：换掩体必须**走过去**——原来这里直接把坐标设过去（瞬移），
+        // 在玩家眼里就是"凭空出现在另一个箱子后面"，属于要修掉的穿帮。
+        enemyAI.coverName = next.id;
+        enemyAI.coverPos.set(next.x, 0, next.z);
+        enemyAI.path = [new THREE.Vector3(next.x, 0, next.z)];
+        enemyAI.firingSpot = null;
+        enemyAI.badSpots.length = 0;
+        enemyAI.counters.coverChanges++;
+        lastSpawn = {
+          seq: lastSpawn.seq + 1,
+          visible: isVisibleFromPlayer(new THREE.Vector3(next.x, 0, next.z)),
+          distance: +Math.hypot(next.x - camera.position.x, next.z - camera.position.z).toFixed(2),
+          cover: next.id,
+          difficulty: sliceDiff,
+          fallback: next.fallback,
+          cameraY: +camera.position.y.toFixed(2),
+          x: +next.x.toFixed(2),
+          z: +next.z.toFixed(2),
+        };
+      }
+      // B2：真正的横拉用"大身位"，并且直接把枪线位定在这个身位上
+      enemyAI.peekOffset = pickPeekOffset(true);
+      const swingSide = Math.random() < 0.5 ? -1 : 1;
+      const towardPlayer = Math.sign(camera.position.z - enemyAI.coverPos.z) || 1;
+      enemyAI.peekTargetX = enemyAI.coverPos.x + swingSide * enemyAI.peekOffset;
+      enemyAI.peekPos.set(enemyAI.peekTargetX, 0, enemyAI.coverPos.z + towardPlayer * (0.9 + Math.random() * 0.8));
+      if (enemyAI.peekOffset >= Math.max(...feintT.peekSet)) enemyAI.counters.wideSwings++;
+      enemyAI.firingSpot = new THREE.Vector3(enemyAI.peekTargetX, 0, enemyAI.peekPos.z);
+      enemyAI.badSpots.length = 0;
+      enemyAI.feintPlan = false;
+      enemyAI.state = 'walking';
     } else if (enemyAI.state === 'walking') {
       // 移动目标 = 把枪线挪到玩家身上（不是走到玩家身边）
       const speed = CONFIG.enemySpeed * enemyAI.speedJitter;
@@ -2132,7 +2323,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       // 枪线已覆盖玩家（或已到位）→ 停下开火
       if (arrived || enemyLineClear(g.position.x, g.position.z)) {
         enemyAI.state = 'aiming';
-        enemyAI.timer = CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0]);
+        // 需求⑦-G：出手节奏——秒拉(<1)/正常/长架(>1)，避免玩家摸到固定节拍
+        enemyAI.timer =
+          (CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0])) *
+          enemyAI.paceFactor;
+        enemyAI.strafeWaitT = 0;
         enemy.leftLeg.rotation.x = 0;
         enemy.rightLeg.rotation.x = 0;
         facePlayer();
@@ -2147,11 +2342,47 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       enemyAI.aimPose = Math.min(1, enemyAI.aimPose + dt * 3);
       enemy.leftArm.rotation.x = -1.25 * enemyAI.aimPose;
       enemy.rightArm.rotation.x = -1.35 * enemyAI.aimPose;
-      // 大师/极限：拉出后横向移动射击（更难预判）
+      // 需求⑦-C：对枪节奏——高手不会匀速直线横移，而是"变向 + 随机急停"
+      // （counter-strafe：把最准的一枪压在急停那一瞬间）
       if (enemyAI.strafeShoot) {
+        const tac = tactics();
         enemyAI.strafeSeconds += dt;
-        g.position.x += enemyAI.strafeDir * 1.05 * dt;
-        if (Math.abs(g.position.x) > 5.6) enemyAI.strafeDir = -enemyAI.strafeDir;
+        if (enemyAI.strafePauseT > 0) {
+          enemyAI.strafePauseT -= dt; // 急停：这一段完全不动
+        } else {
+          enemyAI.strafeNextChange -= dt;
+          if (enemyAI.strafeNextChange <= 0) {
+            if (Math.abs(g.position.x) > 5.6) {
+              enemyAI.strafeDir = -enemyAI.strafeDir;
+            } else if (Math.random() < tac.strafePause) {
+              enemyAI.strafePauseT = 0.1 + Math.random() * 0.18;
+              enemyAI.strafeWaitT = 0;
+            } else {
+              enemyAI.strafeDir = -enemyAI.strafeDir;
+              enemyAI.counters.strafeReversals++;
+            }
+            enemyAI.strafeNextChange = 0.25 + Math.random() * 0.45;
+          }
+          g.position.x += enemyAI.strafeDir * 1.15 * dt;
+          if (Math.abs(g.position.x) > 5.6) enemyAI.strafeDir = -enemyAI.strafeDir;
+          // 横移也不能穿进掩体里（沿用统一的碰撞推挤）
+          resolveXZ(g.position, 0.4);
+        }
+      }
+      // 需求⑦-D：蹲起（crouch spam）——蹲下时头位从 1.63m 掉到约 1.40m，
+      // 你原本压在爆头线上的准星就打空了；起身再打你一套。高手对枪的常见动作。
+      const tacD = tactics();
+      if (enemyAI.crouchHold > 0) {
+        enemyAI.crouchHold -= dt;
+      } else if (Math.random() < tacD.crouchSpam * dt * 1.3) {
+        enemyAI.crouchHold = 0.35 + Math.random() * 0.55;
+        enemyAI.counters.crouchToggles++;
+      }
+      const wantCrouch = enemyAI.crouch || enemyAI.crouchHold > 0;
+      const wantScaleY = wantCrouch ? 0.86 : 1;
+      if (Math.abs(g.scale.y - wantScaleY) > 0.002) {
+        g.scale.y += (wantScaleY - g.scale.y) * Math.min(1, dt * 10);
+        g.position.y = (-0.06 * (1 - g.scale.y)) / 0.14;
       }
       // 面向玩家
       const toPlayer = new THREE.Vector3(playerPos.x - g.position.x, 0, playerPos.z - g.position.z);
@@ -2163,15 +2394,18 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         if (enemyAI.blocked > 1.2) {
           enemyAI.blocked = 0;
           if (enemyAI.canChangeCover) {
-            // 高难度：直接换掩体绕角度
+            // 高难度：换个掩体绕角度——同样是**走过去**，不瞬移（需求⑦-H）
             const next = pickSpawnPoint();
-            g.position.set(next.x, 0, next.z);
             enemyAI.coverName = next.id;
+            enemyAI.coverPos.set(next.x, 0, next.z);
             enemyAI.counters.coverChanges++;
-            const t = tactics();
             const side = Math.random() < 0.5 ? -1 : 1;
-            const offset = t.peek[0] + Math.random() * Math.max(0, t.peek[1] - t.peek[0]);
-            enemyAI.peekPos.set(next.x + side * offset, 0, next.z + 1.1 + Math.random() * 0.9);
+            const offset = pickPeekOffset(true);
+            enemyAI.peekTargetX = next.x + side * offset;
+            enemyAI.peekPos.set(enemyAI.peekTargetX, 0, next.z + 1.1 + Math.random() * 0.9);
+            enemyAI.path = [new THREE.Vector3(next.x, 0, next.z)];
+            enemyAI.firingSpot = null;
+            enemyAI.badSpots.length = 0;
           } else {
             const side = Math.random() < 0.5 ? -1 : 1;
             enemyAI.peekPos.x = Math.max(-5.6, Math.min(5.6, g.position.x + side * 1.1));
@@ -2179,6 +2413,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
           enemyAI.state = 'walking';
         }
       } else if (enemyAI.timer <= 0) {
+        // 需求⑦-C2：尽量把这一枪留在"急停"里开；但最多等 0.7 秒，别把玩家晾着
+        if (enemyAI.strafeShoot && enemyAI.strafePauseT <= 0) {
+          enemyAI.strafeWaitT += dt;
+          if (enemyAI.strafeWaitT < 0.7) return;
+        }
+        enemyAI.strafeWaitT = 0;
         enemyAI.blocked = 0;
         // 开火：扣血 + 红屏 + 阵亡计数
         // 注意：这里**不能** resetEnemy()——那会把敌人血量一起回满（曾经的"无敌帧"Bug）
@@ -2193,7 +2433,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
           closeEncounter(false);
         }
         // 保持血量与位置，敌人继续瞄准（下次开火前有同样的前摇），直到被击杀
-        enemyAI.timer = CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0]);
+        enemyAI.timer =
+          (CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0])) *
+          enemyAI.paceFactor;
         window.setTimeout(() => {
           hpEl.textContent = '100';
         }, 900);
