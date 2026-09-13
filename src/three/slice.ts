@@ -16,6 +16,7 @@ import * as THREE from 'three';
 import { RIFLE, effectiveSpread, sampleBulletOffset, shouldResetBurst } from '../config/spray';
 import { DAMAGE, shotDamage } from '../config/damage';
 import { sfx } from '../engine/sfx';
+import { DIFFICULTIES } from '../config/difficulty';
 import { summarizeSession } from '../stats/metrics';
 import { pushSession } from '../state/appStore';
 import type { EncounterRecord, ShotRecord } from '../types';
@@ -45,18 +46,37 @@ const CONFIG = {
   moveSpeed: 3.4,
   /** 敌人拉出身位（米） */
   peekOffsets: [0.5, 1.0, 1.6, 2.4],
-  /** 可拉出的掩体点位（敌人每次随机挑一个） */
+  /** 刷新点：全部位于掩体/墙体"后面"（射线从玩家打到该点会被实体挡住） */
   covers: [
-    { id: '门洞左', x: -0.55, z: -6.2 },
-    { id: '门洞右', x: 0.55, z: -6.2 },
-    { id: '木箱后', x: -1.9, z: -4.3 },
-    { id: '木箱左', x: -2.9, z: -3.4 },
-    { id: '矮墙后', x: 2.2, z: -3.1 },
+    { id: '门后左', x: -1.8, z: -7.6 },
+    { id: '门后右', x: 1.8, z: -7.6 },
+    { id: '左侧箱后', x: -4.2, z: 4.4 },
+    { id: '右侧箱后', x: 4.2, z: 4.0 },
+    { id: '后侧箱后', x: 0.2, z: 7.2 },
   ],
   /** 敌人停下后的开火前摇（秒） */
   enemyAimTime: [0.55, 0.95],
   /** 敌人移动速度（米/秒） */
   enemySpeed: 1.9,
+  /** 刷新约束：离玩家最小距离（米）与判定用眼高 */
+  spawn: { minDistance: 4, headHeight: 1.6 },
+};
+
+/**
+ * 难度 → 战术动作表（需求①）
+ * peek：拉出身位范围（米）｜crouch：蹲下概率｜feint：假动作（先探再缩再出）
+ * strafeShoot：拉出后横向移动射击｜coverChange：中途换掩体｜jitter：速度随机抖动比例
+ */
+const TACTICS: Record<
+  string,
+  { peek: [number, number]; crouch: number; feint: boolean; strafeShoot: boolean; coverChange: boolean; jitter: number }
+> = {
+  easy: { peek: [0.6, 1.0], crouch: 0.15, feint: false, strafeShoot: false, coverChange: false, jitter: 0 },
+  normal: { peek: [0.5, 2.4], crouch: 0.25, feint: false, strafeShoot: false, coverChange: false, jitter: 0.1 },
+  hard: { peek: [0.5, 2.4], crouch: 0.4, feint: false, strafeShoot: false, coverChange: false, jitter: 0.2 },
+  insane: { peek: [0.8, 2.6], crouch: 0.45, feint: true, strafeShoot: false, coverChange: true, jitter: 0.3 },
+  master: { peek: [1.0, 2.8], crouch: 0.5, feint: true, strafeShoot: true, coverChange: true, jitter: 0.45 },
+  extreme: { peek: [1.2, 3.2], crouch: 0.55, feint: true, strafeShoot: true, coverChange: true, jitter: 0.65 },
 };
 
 interface SliceHooks {
@@ -311,6 +331,23 @@ function buildRoom(): { root: THREE.Group; walls: THREE.Mesh[] } {
   lamp.position.set(CONFIG.roomWidth / 2 - 0.9, 2.5, -1.5);
   root.add(lamp);
 
+  // 侧后方掩体箱：给"视线外刷新"提供合理落点（玩家背后/侧翼）
+  const flankCrate = new THREE.MeshStandardMaterial({ color: 0x5f452c, roughness: 0.88 });
+  for (const p of [
+    { x: -4.2, z: 4.4 },
+    { x: 4.2, z: 4.0 },
+    { x: 0.2, z: 7.2 },
+  ]) {
+    // 高箱：站立的敌人也能完全藏在后面（顶面 1.95m > 敌人头顶 ~1.77m）
+    const m = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.95, 1.5), flankCrate);
+    m.position.set(p.x, 0.975, p.z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    m.userData.isCover = true;
+    root.add(m);
+    walls.push(m);
+  }
+
   return { root, walls };
 }
 
@@ -343,6 +380,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
             <button class="btn-ghost btn-sm" id="s3-cover-on">有掩体</button>
             <button class="btn-ghost btn-sm" id="s3-cover-off">空旷场地</button>
           </div>
+          <div class="s3-cover-toggle" id="s3-diff-row">
+            <span>难度</span>
+            ${DIFFICULTIES.map(
+              (d) => `<button class="btn-ghost btn-sm" data-diff="${d.id}">${d.name}</button>`,
+            ).join('')}
+          </div>
           <button class="btn-primary btn-lg" id="s3-start">点击进入</button>
           <button class="btn-ghost" id="s3-quit">返回 2D 版</button>
         </div>
@@ -361,6 +404,27 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const crosshairEl = container.querySelector<HTMLElement>('.s3-crosshair')!;
   const coverOnBtn = container.querySelector<HTMLButtonElement>('#s3-cover-on')!;
   const coverOffBtn = container.querySelector<HTMLButtonElement>('#s3-cover-off')!;
+  const diffRow = container.querySelector<HTMLElement>('#s3-diff-row')!;
+
+  /* ---------------- 难度（需求①：影响战术丰富度） ---------------- */
+  const DIFF_KEY = 'jg.slice3d.diff';
+  let sliceDiff = localStorage.getItem(DIFF_KEY) ?? 'normal';
+  const tactics = () =>
+    TACTICS[sliceDiff] ?? TACTICS.normal;
+  const refreshDiffButtons = (): void => {
+    diffRow.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach((b) => {
+      b.classList.toggle('btn-primary', b.dataset.diff === sliceDiff);
+    });
+  };
+  refreshDiffButtons();
+  diffRow.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach((b) => {
+    b.addEventListener('click', () => {
+      sliceDiff = b.dataset.diff ?? 'normal';
+      localStorage.setItem(DIFF_KEY, sliceDiff);
+      refreshDiffButtons();
+      showBanner(`难度：${DIFFICULTIES.find((d) => d.id === sliceDiff)?.name ?? sliceDiff}`);
+    });
+  });
 
   /* ---------------- Three.js 初始化 ---------------- */
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -443,6 +507,48 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     return losRay.intersectObjects(playerCoverMeshes, false).length === 0;
   };
 
+  /* -------- 需求①：刷新必须在玩家视线之外（被掩体挡住）且离玩家足够远 -------- */
+  const spawnRay = new THREE.Raycaster();
+  /**
+   * 玩家能否看到该点（需求①核心：**必须是掩体/墙实体挡住**才允许刷新）
+   * 只用遮挡判定：从玩家眼睛（真实相机高度，蹲下更低）向该点打多条射线，
+   * 只要有任意一条不被挡，就说明玩家能直接看到 → 该点不能用来刷新。
+   */
+  const isVisibleFromPlayer = (pos: THREE.Vector3): boolean => {
+    const target = new THREE.Vector3(pos.x, CONFIG.spawn.headHeight, pos.z);
+    const eye = camera.position.clone();
+    const samples = [
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0.35, 0, 0),
+      new THREE.Vector3(-0.35, 0, 0),
+      new THREE.Vector3(0, 0.2, 0),
+    ];
+    for (const off of samples) {
+      const from = eye.clone().add(off);
+      const d = target.clone().sub(from);
+      const dd = d.length();
+      spawnRay.set(from, d.normalize());
+      spawnRay.far = dd;
+      if (spawnRay.intersectObjects(room.walls, false).length === 0) return true;
+    }
+    return false;
+  };
+  /** 挑选合法刷新点：视线外 + 距离 ≥ 4 米；都不满足时退化为最远的掩体点 */
+  const pickSpawnPoint = (): { x: number; z: number; id: string; fallback: boolean } => {
+    const px = camera.position.x;
+    const pz = camera.position.z;
+    const valid = CONFIG.covers.filter((c) => {
+      if (Math.hypot(c.x - px, c.z - pz) < CONFIG.spawn.minDistance) return false;
+      return !isVisibleFromPlayer(new THREE.Vector3(c.x, 0, c.z));
+    });
+    // 兜底：若没有任何点通过严格遮挡测试，就固定用"背墙后的门后点"——
+    // 墙是通高的，任何站姿/蹲姿都挡得住，绝不会刷在玩家眼前
+    const behindWall = CONFIG.covers.filter((c) => c.z < -6.4);
+    const pool = valid.length > 0 ? valid : behindWall;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    return { ...pick, fallback: valid.length === 0 };
+  };
+
   // 第一人称步枪：挂到相机上（-Z 为枪口方向），做右下角偏移
   const rifle = buildRifle();
   rifle.position.set(0.16, -0.17, -0.34);
@@ -472,7 +578,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const enemy = buildEnemy();
   scene.add(enemy.group);
 
-  type EnemyState = 'hidden' | 'walking' | 'aiming' | 'dead';
+  type EnemyState = 'hidden' | 'feinting' | 'walking' | 'aiming' | 'dead';
   const enemyAI = {
     state: 'hidden' as EnemyState,
     hp: DAMAGE.maxHp,
@@ -483,29 +589,83 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     crouch: false,
     aimPose: 0,
     blocked: 0,
+    speedJitter: 1,
+    strafeShoot: false,
+    strafeDir: 1,
+    strafeSeconds: 0,
+    canChangeCover: false,
+    feintPlan: false,
+    feintPhase: 0,
+    feintPos: new THREE.Vector3(),
+    coverPos: new THREE.Vector3(),
+    waypoint: null as THREE.Vector3 | null,
+    counters: { feints: 0, coverChanges: 0 },
     dieProgress: 0,
     walkPhase: 0,
+  };
+  /** 最近一次刷新的合法性（供自动化验证读取） */
+  let lastSpawn = {
+    seq: 0,
+    visible: true,
+    distance: 0,
+    cover: '',
+    difficulty: 'normal',
+    fallback: false,
+    cameraY: 0,
   };
 
   /** 让敌人从门后出现在门内（隐藏 → 走出门洞） */
   const resetEnemy = (): void => {
-    const cover = CONFIG.covers[Math.floor(Math.random() * CONFIG.covers.length)];
-    const offset = CONFIG.peekOffsets[Math.floor(Math.random() * CONFIG.peekOffsets.length)];
+    const t = tactics();
+    // 需求①：只在视线之外、且离玩家 ≥4 米的位置刷新
+    const cover = pickSpawnPoint();
+    const offset = t.peek[0] + Math.random() * Math.max(0, t.peek[1] - t.peek[0]);
     const side = Math.random() < 0.5 ? -1 : 1;
     enemyAI.state = 'hidden';
     enemyAI.hp = DAMAGE.maxHp;
     enemyAI.timer = 0.6 + Math.random() * 1.6; // 出现前的随机等待
     enemyAI.coverName = cover.id;
-    enemyAI.crouch = Math.random() < 0.35; // 约 1/3 概率蹲下
+    enemyAI.crouch = Math.random() < t.crouch;
+    enemyAI.speedJitter = 1 + (Math.random() * 2 - 1) * t.jitter;
+    enemyAI.strafeShoot = t.strafeShoot;
+    enemyAI.canChangeCover = t.coverChange;
+    enemyAI.strafeSeconds = 0;
+    // 高难度：先做一次假动作（小身位探一下再缩回），才真正拉出
+    enemyAI.feintPlan = t.feint && Math.random() < 0.65;
+    enemyAI.feintPhase = 0;
     enemyAI.aimPose = 0;
     enemyAI.blocked = 0;
+    // 需求①：把刷新点构造在"掩体背向玩家的那一侧"（几何上必定在掩体后）
+    const away = new THREE.Vector3(cover.x - camera.position.x, 0, cover.z - camera.position.z);
+    if (away.lengthSq() < 0.0001) away.set(0, 0, 1);
+    away.normalize();
+    // 偏移限制在掩体投影范围内（0.6m），保证刷新点始终处于掩体后方而不是被推到侧面
+    const spawnX = cover.x + away.x * 0.6;
+    const spawnZ = cover.z + away.z * 0.6;
     // 从掩体后拉出：横向一个身位 + 朝玩家方向走出一段
+    enemyAI.coverPos.set(spawnX, 0, spawnZ);
+    // 拉出方向：永远朝玩家一侧（避免从掩体后往更远处跑）
+    const toward = Math.sign(camera.position.z - spawnZ) || 1;
     enemyAI.peekTargetX = cover.x + side * offset;
-    enemyAI.peekPos.set(enemyAI.peekTargetX, 0, cover.z + 1.1 + Math.random() * 0.9);
+    enemyAI.peekPos.set(enemyAI.peekTargetX, 0, cover.z + toward * (0.9 + Math.random() * 0.8));
+    enemyAI.feintPos.set(cover.x + side * 0.35, 0, cover.z + toward * 0.35);
+    // 门后刷新：先穿过门洞再拉出（否则会穿墙）
+    enemyAI.waypoint = cover.z < -6.4 ? new THREE.Vector3(0, 0, -6.0) : null;
     enemyAI.dieProgress = 0;
     enemy.group.visible = true;
-    enemy.group.scale.set(1, 1, 1);
-    enemy.group.position.set(cover.x, 0, cover.z);
+    enemy.group.position.set(spawnX, 0, spawnZ);
+    // 保险：刷新瞬间先"蹲在掩体后"（头部降到约 1.4m，被掩体完全挡住），拉出时才起身
+    enemy.group.scale.set(1, 0.86, 1);
+    enemy.group.position.y = -0.06;
+    lastSpawn = {
+      seq: lastSpawn.seq + 1,
+      visible: isVisibleFromPlayer(new THREE.Vector3(spawnX, 0, spawnZ)),
+      distance: +Math.hypot(spawnX - camera.position.x, spawnZ - camera.position.z).toFixed(2),
+      cover: cover.id,
+      difficulty: sliceDiff,
+      fallback: cover.fallback,
+      cameraY: +camera.position.y.toFixed(2),
+    };
     enemy.group.rotation.set(0, 0, 0);
     enemy.leftArm.rotation.set(0, 0, 0);
     enemy.rightArm.rotation.set(0, 0, 0);
@@ -540,6 +700,26 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       blocked: +enemyAI.blocked.toFixed(2),
     }),
     deaths: () => stats.deaths,
+    probe: (x: number, y: number, z: number) => {
+      const from = camera.position.clone();
+      const target = new THREE.Vector3(x, y, z);
+      const d = target.clone().sub(from);
+      const dd = d.length();
+      spawnRay.set(from, d.normalize());
+      spawnRay.far = dd;
+      const hits = spawnRay.intersectObjects(room.walls, false);
+      return {
+        wallCount: room.walls.length,
+        hitCount: hits.length,
+        firstHit: hits[0] ? { dist: +hits[0].distance.toFixed(2), far: +dd.toFixed(2) } : null,
+      };
+    },
+    spawnInfo: () => ({ ...lastSpawn, counters: { ...enemyAI.counters }, strafeSeconds: +enemyAI.strafeSeconds.toFixed(1) }),
+    setDifficulty: (id: string) => {
+      sliceDiff = id;
+      localStorage.setItem(DIFF_KEY, id);
+      refreshDiffButtons();
+    },
   };
 
   /* ---------------- 输入与射击 ---------------- */
@@ -963,17 +1143,68 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     if (enemyAI.state === 'hidden') {
       enemyAI.timer -= dt;
       if (enemyAI.timer <= 0) {
-        enemyAI.state = 'walking';
+        // 高难度先做假动作（探一下再缩回），再真正拉出
+        enemyAI.state = enemyAI.feintPlan ? 'feinting' : 'walking';
         openEncounter();
+      }
+    } else if (enemyAI.state === 'feinting') {
+      // 假动作：小身位探出 → 短暂停顿 → 缩回掩体
+      const target = enemyAI.feintPhase === 0 ? enemyAI.feintPos : enemyAI.coverPos;
+      const dir = target.clone().sub(g.position);
+      const dist = dir.length();
+      if (dist > 0.05) {
+        dir.normalize();
+        g.position.addScaledVector(dir, CONFIG.enemySpeed * 1.5 * enemyAI.speedJitter * dt);
+        g.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI;
+        enemyAI.walkPhase += dt * 9;
+        const swing = Math.sin(enemyAI.walkPhase) * 0.5;
+        enemy.leftLeg.rotation.x = swing;
+        enemy.rightLeg.rotation.x = -swing;
+      } else if (enemyAI.feintPhase === 0) {
+        enemyAI.feintPhase = 1;
+        enemyAI.timer = 0.22; // 探出后短暂停留
+      } else {
+        // 缩回完成：统计一次假动作；高难度有概率直接换掩体再出
+        enemyAI.counters.feints++;
+        if (enemyAI.canChangeCover && Math.random() < 0.45) {
+          const next = pickSpawnPoint();
+          const t = tactics();
+          const side = Math.random() < 0.5 ? -1 : 1;
+          const offset = t.peek[0] + Math.random() * Math.max(0, t.peek[1] - t.peek[0]);
+          enemyAI.coverName = next.id;
+          enemyAI.coverPos.set(next.x, 0, next.z);
+          enemyAI.peekTargetX = next.x + side * offset;
+          enemyAI.peekPos.set(enemyAI.peekTargetX, 0, next.z + 1.1 + Math.random() * 0.9);
+          g.position.set(next.x, 0, next.z);
+          enemyAI.counters.coverChanges++;
+          lastSpawn = {
+            seq: lastSpawn.seq + 1,
+            visible: isVisibleFromPlayer(new THREE.Vector3(next.x, 0, next.z)),
+            distance: +Math.hypot(next.x - camera.position.x, next.z - camera.position.z).toFixed(2),
+            cover: next.id,
+            difficulty: sliceDiff,
+            fallback: next.fallback,
+            cameraY: +camera.position.y.toFixed(2),
+          };
+        }
+        enemyAI.feintPlan = false;
+        enemyAI.state = 'walking';
       }
     } else if (enemyAI.state === 'walking') {
       // 从掩体后走到拉出位（沿路径绕过掩体）
-      const target = enemyAI.peekPos;
+      const target = enemyAI.waypoint ?? enemyAI.peekPos;
       const dir = target.clone().sub(g.position);
       const dist = dir.length();
       if (dist > 0.06) {
         dir.normalize();
-        g.position.addScaledVector(dir, CONFIG.enemySpeed * dt);
+        g.position.addScaledVector(dir, CONFIG.enemySpeed * enemyAI.speedJitter * dt);
+        // 离开掩体开始拉出时起身（除非本波战术要求保持蹲姿）
+        if (!enemyAI.crouch) {
+          if (g.scale.y < 1) {
+            g.scale.y = Math.min(1, g.scale.y + dt * 2.2);
+            g.position.y = -0.06 * (1 - g.scale.y) / 0.14;
+          }
+        }
         g.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI;
         enemyAI.walkPhase += dt * 7;
         const swing = Math.sin(enemyAI.walkPhase) * 0.55;
@@ -983,6 +1214,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         enemy.rightArm.rotation.x = swing * 0.6;
         g.position.y = Math.abs(Math.sin(enemyAI.walkPhase)) * 0.035;
       } else {
+        if (enemyAI.waypoint) {
+          // 到达中转点（门口）后继续走向拉出位
+          enemyAI.waypoint = null;
+          return;
+        }
         enemyAI.state = 'aiming';
         enemyAI.timer = CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0]);
         enemy.leftLeg.rotation.x = 0;
@@ -999,6 +1235,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       enemyAI.aimPose = Math.min(1, enemyAI.aimPose + dt * 3);
       enemy.leftArm.rotation.x = -1.25 * enemyAI.aimPose;
       enemy.rightArm.rotation.x = -1.35 * enemyAI.aimPose;
+      // 大师/极限：拉出后横向移动射击（更难预判）
+      if (enemyAI.strafeShoot) {
+        enemyAI.strafeSeconds += dt;
+        g.position.x += enemyAI.strafeDir * 1.05 * dt;
+        if (Math.abs(g.position.x) > 5.6) enemyAI.strafeDir = -enemyAI.strafeDir;
+      }
       // 面向玩家
       const toPlayer = new THREE.Vector3(playerPos.x - g.position.x, 0, playerPos.z - g.position.z);
       g.rotation.y = Math.atan2(toPlayer.x, toPlayer.z) + Math.PI;
@@ -1008,8 +1250,20 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         enemyAI.blocked += dt;
         if (enemyAI.blocked > 1.2) {
           enemyAI.blocked = 0;
-          const side = Math.random() < 0.5 ? -1 : 1;
-          enemyAI.peekPos.x = Math.max(-5.6, Math.min(5.6, g.position.x + side * 1.1));
+          if (enemyAI.canChangeCover) {
+            // 高难度：直接换掩体绕角度
+            const next = pickSpawnPoint();
+            g.position.set(next.x, 0, next.z);
+            enemyAI.coverName = next.id;
+            enemyAI.counters.coverChanges++;
+            const t = tactics();
+            const side = Math.random() < 0.5 ? -1 : 1;
+            const offset = t.peek[0] + Math.random() * Math.max(0, t.peek[1] - t.peek[0]);
+            enemyAI.peekPos.set(next.x + side * offset, 0, next.z + 1.1 + Math.random() * 0.9);
+          } else {
+            const side = Math.random() < 0.5 ? -1 : 1;
+            enemyAI.peekPos.x = Math.max(-5.6, Math.min(5.6, g.position.x + side * 1.1));
+          }
           enemyAI.state = 'walking';
         }
       } else if (enemyAI.timer <= 0) {
