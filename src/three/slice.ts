@@ -216,10 +216,16 @@ function buildEnemy(): {
   group.traverse((o) => {
     const m = o as THREE.Mesh;
     if (m.isMesh) {
-      m.castShadow = true;
       m.receiveShadow = true;
+      // 只有大部件投影（头发/手臂/枪不投影）：减少阴影深度着色器数量与批次，
+      // 避免敌人首次出现时为每个材质编译深度着色器造成"卡一下"
+      m.castShadow = false;
     }
   });
+  torso.castShadow = true;
+  head.castShadow = true;
+  leftLeg.castShadow = true;
+  rightLeg.castShadow = true;
 
   // 命中判定分区：整具身体都可命中（头/头发=爆头，其余=身体）
   group.traverse((o) => {
@@ -913,7 +919,14 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       triangles: renderer.info.render.triangles,
       shadows: renderer.shadowMap.enabled,
       buffer: [renderer.domElement.width, renderer.domElement.height],
+      longFrames,
+      maxFrameMs: +maxFrameMs.toFixed(1),
+      loopError,
     }),
+    resetMaxFrame: () => {
+      maxFrameMs = 0;
+      longFrames = 0;
+    },
     setQuality: (q: 'high' | 'medium' | 'low') => {
       autoQuality = false;
       applyQuality(q);
@@ -999,6 +1012,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const autoSamples: number[] = [];
   let loopError = '';
   let longFrames = 0;
+  let maxFrameMs = 0;
 
   const stats = { shots: 0, hits: 0, kills: 0, deaths: 0, startedEpoch: Date.now(), startedPerf: performance.now() };
   const shotRecords: ShotRecord[] = [];
@@ -1013,6 +1027,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const decalMat = new THREE.MeshBasicMaterial({ color: 0x121212, transparent: true, opacity: 0.9 });
   const sparkMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0 });
   const bloodMat = new THREE.MeshBasicMaterial({ color: 0xa81f1a });
+  // 复用同一份几何体：避免每次命中都新建 GPU 缓冲（会造成命中瞬间卡顿）
+  const sparkGeo = new THREE.SphereGeometry(0.012, 5, 4);
 
   const raycaster = new THREE.Raycaster();
 
@@ -1023,7 +1039,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     mat: THREE.Material = sparkMat,
   ): void => {
     for (let i = 0; i < count; i++) {
-      const m = new THREE.Mesh(new THREE.SphereGeometry(0.012, 5, 4), mat);
+      const m = new THREE.Mesh(sparkGeo, mat);
       m.position.copy(point);
       const vel = normal
         .clone()
@@ -1296,6 +1312,18 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   ro.observe(container);
   resize();
 
+  /** 预编译：把场景里所有材质的着色器（含阴影深度材质）提前编译好，
+   *  否则敌人首次出现/首次投影时会现场编译 → 明显的"卡一下" */
+  const warmUp = (): void => {
+    try {
+      renderer.compile(scene, camera);
+      renderer.render(scene, camera); // 跑一帧把阴影贴图与程序都预热
+    } catch {
+      // 预热失败不影响运行
+    }
+  };
+  warmUp();
+
   /** 应用画质档位（改像素比/阴影/灯光强度，并立即重算画布尺寸） */
   const applyQuality = (level: QualityLevel): void => {
     qualityLevel = level;
@@ -1382,6 +1410,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     lastT = now;
     // 卡顿统计：单帧超过 400ms 记为一次长卡（用于判断是"持续低帧"还是"周期性卡死"）
     if (dt > 0.4) longFrames++;
+    if (dt * 1000 > maxFrameMs) maxFrameMs = dt * 1000;
     if (!running) return;
 
     // —— 视角 ——
