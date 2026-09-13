@@ -36,6 +36,8 @@ const CONFIG = {
   doorZ: -6,
   /** 掩体（木箱）位置 */
   crate: { x: -1.9, z: -3.4, w: 1.2, h: 1.1, d: 1.2 },
+  /** 玩家侧掩体（半高墙，蹲下可完全躲住） */
+  playerCover: { x: 0.6, z: 0.9, w: 3.2, h: 1.3, d: 0.5 },
   /** 玩家可移动范围 */
   moveLimitX: 4.2,
   moveLimitZ: 3.2,
@@ -336,6 +338,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         <div class="s3-card">
           <h2>3D 垂直切片</h2>
           <p>程序化建模：房间 / 掩体 / 敌人 / 步枪全部由代码几何体生成。点击开始，Esc 退出。</p>
+          <div class="s3-cover-toggle">
+            <span>玩家掩体</span>
+            <button class="btn-ghost btn-sm" id="s3-cover-on">有掩体</button>
+            <button class="btn-ghost btn-sm" id="s3-cover-off">空旷场地</button>
+          </div>
           <button class="btn-primary btn-lg" id="s3-start">点击进入</button>
           <button class="btn-ghost" id="s3-quit">返回 2D 版</button>
         </div>
@@ -352,6 +359,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const hpBarEl = container.querySelector<HTMLElement>('#s3-hpbar')!;
   const dmgLayer = container.querySelector<HTMLElement>('#s3-dmg')!;
   const crosshairEl = container.querySelector<HTMLElement>('.s3-crosshair')!;
+  const coverOnBtn = container.querySelector<HTMLButtonElement>('#s3-cover-on')!;
+  const coverOffBtn = container.querySelector<HTMLButtonElement>('#s3-cover-off')!;
 
   /* ---------------- Three.js 初始化 ---------------- */
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -387,6 +396,52 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
   const room = buildRoom();
   scene.add(room.root);
+
+  /* ---------------- 玩家掩体（可开关） ---------------- */
+  const COVER_KEY = 'jg.slice3d.cover';
+  const coverState = { on: (localStorage.getItem(COVER_KEY) ?? 'on') !== 'off' };
+  let playerCoverMeshes: THREE.Mesh[] = [];
+
+  /** 生成 / 移除玩家侧掩体（半高墙，蹲下可完全藏住） */
+  const applyCoverSetting = (): void => {
+    // 先清理旧掩体
+    for (const m of playerCoverMeshes) {
+      scene.remove(m);
+      const idx = room.walls.indexOf(m);
+      if (idx >= 0) room.walls.splice(idx, 1);
+    }
+    playerCoverMeshes = [];
+
+    if (coverState.on) {
+      const c = CONFIG.playerCover;
+      const mat = new THREE.MeshStandardMaterial({ color: 0x8a8172, roughness: 0.92 });
+      const wallMesh = new THREE.Mesh(new THREE.BoxGeometry(c.w, c.h, c.d), mat);
+      wallMesh.position.set(c.x, c.h / 2, c.z);
+      wallMesh.castShadow = true;
+      wallMesh.receiveShadow = true;
+      wallMesh.userData.isPlayerCover = true;
+      scene.add(wallMesh);
+      playerCoverMeshes.push(wallMesh);
+      room.walls.push(wallMesh); // 加入射线目标：玩家子弹会打在掩体上留弹孔
+    }
+    coverOnBtn.classList.toggle('btn-primary', coverState.on);
+    coverOffBtn.classList.toggle('btn-primary', !coverState.on);
+    localStorage.setItem(COVER_KEY, coverState.on ? 'on' : 'off');
+  };
+  applyCoverSetting();
+
+  /** 敌人视线判定：从敌人眼睛到玩家相机，被玩家掩体挡住则返回 false */
+  const losRay = new THREE.Raycaster();
+  const enemyHasLineOfSight = (): boolean => {
+    if (playerCoverMeshes.length === 0) return true;
+    const from = new THREE.Vector3(enemy.group.position.x, 1.5, enemy.group.position.z);
+    const to = camera.position.clone();
+    const dir = to.clone().sub(from);
+    const dist = dir.length();
+    losRay.set(from, dir.normalize());
+    losRay.far = dist;
+    return losRay.intersectObjects(playerCoverMeshes, false).length === 0;
+  };
 
   // 第一人称步枪：挂到相机上（-Z 为枪口方向），做右下角偏移
   const rifle = buildRifle();
@@ -427,6 +482,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     coverName: '',
     crouch: false,
     aimPose: 0,
+    blocked: 0,
     dieProgress: 0,
     walkPhase: 0,
   };
@@ -442,6 +498,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     enemyAI.coverName = cover.id;
     enemyAI.crouch = Math.random() < 0.35; // 约 1/3 概率蹲下
     enemyAI.aimPose = 0;
+    enemyAI.blocked = 0;
     // 从掩体后拉出：横向一个身位 + 朝玩家方向走出一段
     enemyAI.peekTargetX = cover.x + side * offset;
     enemyAI.peekPos.set(enemyAI.peekTargetX, 0, cover.z + 1.1 + Math.random() * 0.9);
@@ -476,6 +533,13 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     rifle,
     parts: { mag: magPart, charging: chargingPart },
     reloadState: () => ({ reloading, magY: +magPart.position.y.toFixed(3), chargeZ: +chargingPart.position.z.toFixed(3) }),
+    coverState: () => ({
+      on: coverState.on,
+      count: playerCoverMeshes.length,
+      los: enemyHasLineOfSight(),
+      blocked: +enemyAI.blocked.toFixed(2),
+    }),
+    deaths: () => stats.deaths,
   };
 
   /* ---------------- 输入与射击 ---------------- */
@@ -707,6 +771,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const onKeyDown = (e: KeyboardEvent): void => {
     keys.add(e.code);
     if (e.code === 'KeyR') startReload();
+    // C：随时切换玩家掩体（有掩体 / 空旷场地）
+    if (e.code === 'KeyC') {
+      coverState.on = !coverState.on;
+      applyCoverSetting();
+      showBanner(coverState.on ? '掩体：开启' : '掩体：关闭');
+    }
     if (e.code === 'Escape') exit();
     if (e.code === 'ControlLeft' || e.code === 'ControlRight') crouching = true;
   };
@@ -776,6 +846,14 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
 
   container.querySelector<HTMLButtonElement>('#s3-start')!.addEventListener('click', start);
+  coverOnBtn.addEventListener('click', () => {
+    coverState.on = true;
+    applyCoverSetting();
+  });
+  coverOffBtn.addEventListener('click', () => {
+    coverState.on = false;
+    applyCoverSetting();
+  });
   container.querySelector<HTMLButtonElement>('#s3-quit')!.addEventListener('click', () => {
     running = false;
     hooks.onExit();
@@ -924,7 +1002,18 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       // 面向玩家
       const toPlayer = new THREE.Vector3(playerPos.x - g.position.x, 0, playerPos.z - g.position.z);
       g.rotation.y = Math.atan2(toPlayer.x, toPlayer.z) + Math.PI;
-      if (enemyAI.timer <= 0) {
+      // 真实遮挡：玩家躲在掩体后 → 敌人看不见就不开火，并侧移换角度找人
+      const hasLos = enemyHasLineOfSight();
+      if (!hasLos) {
+        enemyAI.blocked += dt;
+        if (enemyAI.blocked > 1.2) {
+          enemyAI.blocked = 0;
+          const side = Math.random() < 0.5 ? -1 : 1;
+          enemyAI.peekPos.x = Math.max(-5.6, Math.min(5.6, g.position.x + side * 1.1));
+          enemyAI.state = 'walking';
+        }
+      } else if (enemyAI.timer <= 0) {
+        enemyAI.blocked = 0;
         // 开火：扣血 + 红屏 + 阵亡计数
         // 注意：这里**不能** resetEnemy()——那会把敌人血量一起回满（曾经的"无敌帧"Bug）
         stats.deaths++;

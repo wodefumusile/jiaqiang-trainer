@@ -670,6 +670,21 @@ select {
   margin: 0 6px;
 }
 
+.s3-cover-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: #8b949e;
+}
+
+.s3-cover-toggle .btn-sm {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
 .link-3d {
   color: #7cfc9b;
   text-decoration: none;
