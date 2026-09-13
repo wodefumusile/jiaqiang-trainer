@@ -13,7 +13,7 @@
  *  - 反馈：枪口火光、弹壳/火花、墙面弹孔、命中/击杀提示（复用现有音效与统计管线）
  */
 import * as THREE from 'three';
-import { RIFLE, SPRAY, effectiveSpread, sampleBulletOffset } from '../config/spray';
+import { RIFLE, effectiveSpread, sampleBulletOffset, shouldResetBurst } from '../config/spray';
 import { DAMAGE, shotDamage } from '../config/damage';
 import { sfx } from '../engine/sfx';
 import { summarizeSession } from '../stats/metrics';
@@ -463,6 +463,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     scene,
     ai: enemyAI,
     aimAt: debugAim,
+    getBurst: () => burst,
   };
 
   /* ---------------- 输入与射击 ---------------- */
@@ -536,12 +537,13 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     }
     ammo--;
     ammoEl.textContent = String(ammo);
-    if (now - lastShot > SPRAY.recoveryMs) burst = 0;
+    const moving = playerVel.length() > 0.4; // 需求④：移动打断连射累积
+    if (shouldResetBurst(moving, now - lastShot)) burst = 0;
     burst++;
     lastShot = now;
 
     // 前两发精准；之后按散布半径换算成角度偏移（复用 2D 版的散布模型）
-    const spreadPx = effectiveSpread(burst, window.innerWidth, false);
+    const spreadPx = effectiveSpread(burst, window.innerWidth, moving);
     const off = sampleBulletOffset(spreadPx);
     const halfFovY = (75 * Math.PI) / 360;
     const angleX = Math.atan((off.x / window.innerWidth) * 2 * Math.tan(halfFovY) * camera.aspect);
@@ -795,6 +797,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     if (wish.lengthSq() > 0) wish.normalize().multiplyScalar(CONFIG.moveSpeed);
     playerVel.lerp(wish, Math.min(1, dt * 12));
     playerPos.addScaledVector(playerVel, dt);
+    // 需求④：移动期间持续清零连射累积（急停后第一发必定精准）
+    if (playerVel.length() > 0.4) burst = 0;
     playerPos.x = Math.max(-CONFIG.moveLimitX, Math.min(CONFIG.moveLimitX, playerPos.x));
     playerPos.z = Math.max(-CONFIG.moveLimitZ, Math.min(2.9, playerPos.z));
     const eye = crouching ? CONFIG.crouchHeight : CONFIG.eyeHeight;

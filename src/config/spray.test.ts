@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { effectiveSpread, movementSpread, RIFLE, sampleBulletOffset, SPRAY, spreadRadius } from './spray';
+import {
+  effectiveSpread,
+  movementSpread,
+  RIFLE,
+  sampleBulletOffset,
+  shouldResetBurst,
+  SPRAY,
+  spreadRadius,
+} from './spray';
 
 describe('spray 弹道散布', () => {
   it('前两发完全精准', () => {
@@ -43,5 +51,16 @@ describe('spray 弹道散布', () => {
     expect(effectiveSpread(1, 1600, false)).toBe(0);
     // 连射散布超过移动散布时取连射
     expect(effectiveSpread(20, 1600, true)).toBe(spreadRadius(20, 1600));
+  });
+
+  it('移动会立即打断连射累积（需求④）', () => {
+    // 移动中：无论距上一发多近，都重置
+    expect(shouldResetBurst(true, 10)).toBe(true);
+    expect(shouldResetBurst(true, 0)).toBe(true);
+    // 站定但仍在连射间隔内：不重置
+    expect(shouldResetBurst(false, 100)).toBe(false);
+    expect(shouldResetBurst(false, SPRAY.recoveryMs - 1)).toBe(false);
+    // 站定且停火超过恢复时间：重置
+    expect(shouldResetBurst(false, SPRAY.recoveryMs + 1)).toBe(true);
   });
 });

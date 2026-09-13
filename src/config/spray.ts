@@ -44,6 +44,15 @@ export function effectiveSpread(burstCount: number, width: number, moving: boole
   return moving ? Math.max(base, movementSpread(width)) : base;
 }
 
+/**
+ * 连射计数是否需要重置。
+ * 规则（对应需求④）：**只要玩家在移动就立刻打断连射累积**（停下后重新从"前两发精准"开始）；
+ * 另外停火超过 recoveryMs 也会重置。
+ */
+export function shouldResetBurst(moving: boolean, sinceLastShotMs: number): boolean {
+  return moving || sinceLastShotMs > SPRAY.recoveryMs;
+}
+
 export interface BulletOffset {
   x: number;
   y: number;

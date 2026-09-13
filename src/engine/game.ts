@@ -10,7 +10,7 @@ import type {
 import { pxPerCount } from '../config/sensitivity';
 import { effectiveEnemy, type DifficultyConfig, type EffectiveEnemy } from '../config/difficulty';
 import type { ModeConfig } from '../config/modes';
-import { effectiveSpread, RIFLE, sampleBulletOffset, SPRAY } from '../config/spray';
+import { effectiveSpread, RIFLE, sampleBulletOffset, shouldResetBurst, SPRAY } from '../config/spray';
 import { DAMAGE, shotDamage } from '../config/damage';
 import { clamp, rand } from '../utils/math';
 import { hitZone, type Circle, type Rect } from './hitTest';
@@ -430,6 +430,9 @@ export class Game {
 
   private update(dt: number, now: number): void {
     const e = this.enemy;
+
+    // 需求④：只要玩家在移动，立刻打断连射累积（停下后重新从"前两发精准"开始）
+    if (Math.abs(this.playerVel) > 30) this.burstCount = 0;
 
     // 玩家移动（AD 横移）与下蹲
     const dir = (this.moveRight ? 1 : 0) - (this.moveLeft ? 1 : 0);
@@ -865,7 +868,7 @@ export class Game {
     const hb = this.enemyHitbox();
 
     // 弹道散布：前两发精准，连射散布递增；停火超时重置
-    if (now - this.lastShotAt > SPRAY.recoveryMs) this.burstCount = 0;
+    if (shouldResetBurst(Math.abs(this.playerVel) > 30, now - this.lastShotAt)) this.burstCount = 0;
     this.burstCount++;
     this.lastShotAt = now;
     // 后坐力抬视角
