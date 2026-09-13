@@ -562,30 +562,6 @@ select {
   }
 }
 
-/* 敌人血条 */
-.s3-hpbar {
-  position: absolute;
-  width: 64px;
-  height: 6px;
-  margin-left: -32px;
-  margin-top: -14px;
-  background: rgba(0, 0, 0, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  border-radius: 3px;
-  overflow: hidden;
-  display: none;
-  z-index: 6;
-  pointer-events: none;
-}
-
-.s3-hpbar i {
-  display: block;
-  height: 100%;
-  width: 100%;
-  background: #7cfc9b;
-  transition: width 0.12s linear;
-}
-
 /* 伤害数字 */
 .s3-dmg {
   position: absolute;

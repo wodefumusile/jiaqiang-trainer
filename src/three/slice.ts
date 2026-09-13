@@ -368,7 +368,6 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       </div>
       <div class="s3-ammo"><span id="s3-ammo">25</span> / 25</div>
       <div class="s3-crosshair"></div>
-      <div class="s3-hpbar" id="s3-hpbar"><i></i></div>
       <div class="s3-dmg" id="s3-dmg"></div>
       <div class="s3-banner" id="s3-banner"></div>
       <div class="s3-overlay" id="s3-overlay">
@@ -399,7 +398,6 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const accEl = container.querySelector<HTMLElement>('#s3-acc')!;
   const hpEl = container.querySelector<HTMLElement>('#s3-hp')!;
   const bannerEl = container.querySelector<HTMLElement>('#s3-banner')!;
-  const hpBarEl = container.querySelector<HTMLElement>('#s3-hpbar')!;
   const dmgLayer = container.querySelector<HTMLElement>('#s3-dmg')!;
   const crosshairEl = container.querySelector<HTMLElement>('.s3-crosshair')!;
   const coverOnBtn = container.querySelector<HTMLButtonElement>('#s3-cover-on')!;
@@ -1375,22 +1373,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       }
     }
 
-    // —— 敌人血条（投影到屏幕） ——
-    if (enemy.group.visible && enemyAI.state !== 'hidden') {
-      const top = new THREE.Vector3(enemy.group.position.x, 1.92, enemy.group.position.z).project(camera);
-      const onScreen = top.z < 1;
-      hpBarEl.style.display = onScreen ? 'block' : 'none';
-      if (onScreen) {
-        hpBarEl.style.left = `${((top.x + 1) / 2) * 100}%`;
-        hpBarEl.style.top = `${((-top.y + 1) / 2) * 100}%`;
-        const ratio = Math.max(0, enemyAI.hp / DAMAGE.maxHp);
-        const fill = hpBarEl.firstElementChild as HTMLElement;
-        fill.style.width = `${ratio * 100}%`;
-        fill.style.background = ratio > 0.5 ? '#7cfc9b' : ratio > 0.25 ? '#ffd166' : '#ff5c5c';
-      }
-    } else {
-      hpBarEl.style.display = 'none';
-    }
+    // 注意：不显示敌人血条——它会透过掩体暴露敌人位置（命中反馈用受击红闪/血雾/伤害数字）
 
     // —— 火花衰减 ——
     for (let i = sparks.length - 1; i >= 0; i--) {
