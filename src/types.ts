@@ -23,6 +23,8 @@ export interface CrosshairStyle {
   gap: number;
   thickness: number;
   dot: boolean;
+  /** 准星描边（黑边）：亮色背景下不会"看不见准星" */
+  outline: boolean;
 }
 
 export interface Opening {

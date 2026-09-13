@@ -19,10 +19,19 @@ import { sfx } from '../engine/sfx';
 import { DIFFICULTIES } from '../config/difficulty';
 import { summarizeSession } from '../stats/metrics';
 import { pushSession } from '../state/appStore';
-import type { EncounterRecord, ShotRecord } from '../types';
+import {
+  CROSSHAIR_COLORS,
+  clampCrosshair,
+  clampSens,
+  crosshairVars,
+  sensDegreesPerCount,
+  sensSummary,
+  withPreset,
+} from '../config/aimSettings';
+import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-0.8';
+const BUILD_STAMP = 'v3d-0.9';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -173,6 +182,32 @@ const TACTICS: Record<
 interface SliceHooks {
   onExit: () => void;
 }
+
+/**
+ * 主页"难度"单元里的一句话战术说明。
+ * 注意：这是**3D 版真实行为**的描述（对应 TACTICS 表），不是 2D 时代的速度倍率文案——
+ * 玩家看一眼就知道这一档的敌人会做什么。
+ */
+const DIFF_MENU_DESC: Record<string, string> = {
+  easy: '小身位 · 不还手战术',
+  normal: '小身位 · 偶尔蹲',
+  hard: '假动作 · 急停 · 擦弹再拉',
+  insane: '大身位 · 换掩体 · 蹲起',
+  master: '横移对枪 · 预瞄提前量',
+  extreme: '双段假动作 · 大身位横拉',
+};
+
+/**
+ * 准星 DOM 结构：4 条线 + 1 个中心点。
+ * 游戏内准星和主页预览共用同一份结构与同一套 CSS 变量，
+ * 所以"预览看到的"就是"进游戏打到的"，不会两套皮。
+ */
+const CROSSHAIR_HTML = `
+                  <i class="ch-line ch-t"></i>
+                  <i class="ch-line ch-b"></i>
+                  <i class="ch-line ch-l"></i>
+                  <i class="ch-line ch-r"></i>
+                  <i class="ch-dot"></i>`;
 
 /** 程序化步枪：返回一个朝向 -Z 的枪组（坐标系：-Z 为枪口方向、+Y 为上） */
 function buildRifle(): THREE.Group {
@@ -466,41 +501,141 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         <div class="s3-line">血量 <b id="s3-hp">100</b></div>
       </div>
       <div class="s3-ammo"><span id="s3-ammo">25</span> / 25</div>
-      <div class="s3-crosshair"></div>
+      <div class="s3-crosshair" id="s3-cross">${CROSSHAIR_HTML}</div>
       <div class="s3-dmg" id="s3-dmg"></div>
       <div class="s3-banner" id="s3-banner"></div>
       <div class="s3-lock-hint hidden" id="s3-lock-hint">点击画面以捕获鼠标（否则无法转视角）</div>
       <div class="s3-overlay" id="s3-overlay">
-        <div class="s3-card">
-          <h2>3D 垂直切片</h2>
-          <p>程序化建模：房间 / 掩体 / 敌人 / 步枪全部由代码几何体生成。点击开始，Esc 退出。</p>
-          <div class="s3-cover-toggle">
-            <span>玩家掩体</span>
-            <button class="btn-ghost btn-sm" id="s3-cover-on">有掩体</button>
-            <button class="btn-ghost btn-sm" id="s3-cover-off">空旷场地</button>
+        <div class="s3-card s3-menu-card">
+          <div class="s3-menu-head">
+            <div>
+              <h2>架枪训练器</h2>
+              <p class="s3-menu-sub">鼠标转视角 · WASD 移动 · Ctrl 下蹲 · 左键连发 · R 换弹 · Esc 退出</p>
+            </div>
+            <div class="s3-ver">${BUILD_STAMP}</div>
           </div>
-          <div class="s3-cover-toggle" id="s3-diff-row">
-            <span>难度</span>
-            ${DIFFICULTIES.map(
-              (d) => `<button class="btn-ghost btn-sm" data-diff="${d.id}">${d.name}</button>`,
-            ).join('')}
+
+          <div class="s3-menu">
+            <!-- 单元 1：场景 -->
+            <section class="s3-sec">
+              <div class="s3-sec-head"><b>1</b>场景</div>
+              <div class="s3-scene-list" id="s3-scene-row">
+                <button class="s3-scene is-on" data-scene="room3d" type="button">
+                  <i class="s3-scene-thumb" aria-hidden="true"></i>
+                  <span class="s3-scene-txt">
+                    <b>3D 训练房间</b>
+                    <em>砖墙 · 木箱 · 沙袋 · 门洞｜掩体挡人挡弹</em>
+                  </span>
+                  <span class="s3-scene-tag">当前</span>
+                </button>
+              </div>
+              <div class="s3-field">
+                <label>玩家掩体</label>
+                <div class="s3-pills">
+                  <button class="s3-pill" id="s3-cover-on" type="button">有掩体</button>
+                  <button class="s3-pill" id="s3-cover-off" type="button">空旷场地</button>
+                </div>
+              </div>
+            </section>
+
+            <!-- 单元 2：难度 -->
+            <section class="s3-sec">
+              <div class="s3-sec-head"><b>2</b>难度</div>
+              <div class="s3-diff-grid" id="s3-diff-row">
+                ${DIFFICULTIES.map(
+                  (d) => `<button class="s3-diff" data-diff="${d.id}" type="button">
+                    <b>${d.name}</b><em>${DIFF_MENU_DESC[d.id] ?? d.description}</em>
+                  </button>`,
+                ).join('')}
+              </div>
+              <div class="s3-field">
+                <label>本局敌人数量</label>
+                <div class="s3-pills" id="s3-count-row">
+                  <button class="s3-pill" data-count="5" type="button">5</button>
+                  <button class="s3-pill" data-count="10" type="button">10</button>
+                  <button class="s3-pill" data-count="20" type="button">20</button>
+                  <button class="s3-pill" data-count="999" type="button">不限</button>
+                </div>
+              </div>
+            </section>
+
+            <!-- 单元 3：灵敏度及其相关 -->
+            <section class="s3-sec">
+              <div class="s3-sec-head"><b>3</b>灵敏度及其相关</div>
+              <div class="s3-field">
+                <label>游戏预设</label>
+                <div class="s3-pills" id="s3-preset-row">
+                  <button class="s3-pill" data-preset="cs2" type="button">CS2</button>
+                  <button class="s3-pill" data-preset="valorant" type="button">Valorant</button>
+                </div>
+              </div>
+              <div class="s3-field">
+                <label>游戏内灵敏度 <span class="s3-num" id="s3-sens-val">2.00</span></label>
+                <input class="s3-range" type="range" id="s3-sens" min="0.05" max="10" step="0.01" value="2" />
+              </div>
+              <div class="s3-field s3-field-inline">
+                <label>鼠标 DPI</label>
+                <input class="s3-input" type="number" id="s3-dpi" min="100" max="3200" step="50" value="800" />
+              </div>
+              <div class="s3-readout" id="s3-sens-out">--</div>
+              <p class="s3-hint">
+                想要"手感一致"：请关掉 Windows 的「提高指针精确度」，别用带加速曲线的鼠标驱动。
+              </p>
+            </section>
+
+            <!-- 单元 4：准星设置 -->
+            <section class="s3-sec">
+              <div class="s3-sec-head"><b>4</b>准星设置</div>
+              <div class="s3-ch-wrap">
+                <div class="s3-ch-preview">
+                  <div class="s3-crosshair">${CROSSHAIR_HTML}</div>
+                  <span class="s3-ch-preview-tip">预览</span>
+                </div>
+                <div class="s3-ch-controls">
+                  <div class="s3-field">
+                    <label>颜色</label>
+                    <div class="s3-swatches" id="s3-ch-colors">
+                      ${CROSSHAIR_COLORS.map(
+                        (c) => `<button class="s3-swatch" data-color="${c}" style="--sw:${c}" type="button"></button>`,
+                      ).join('')}
+                    </div>
+                  </div>
+                  <div class="s3-ch-sliders">
+                    <div class="s3-field">
+                      <label>长度 <span class="s3-num" id="s3-ch-size-val">8</span></label>
+                      <input class="s3-range" type="range" id="s3-ch-size" min="0" max="26" step="1" value="8" />
+                    </div>
+                    <div class="s3-field">
+                      <label>间隙 <span class="s3-num" id="s3-ch-gap-val">4</span></label>
+                      <input class="s3-range" type="range" id="s3-ch-gap" min="0" max="18" step="1" value="4" />
+                    </div>
+                    <div class="s3-field">
+                      <label>粗细 <span class="s3-num" id="s3-ch-thick-val">2</span></label>
+                      <input class="s3-range" type="range" id="s3-ch-thick" min="1" max="6" step="1" value="2" />
+                    </div>
+                  </div>
+                  <div class="s3-field">
+                    <label>附加</label>
+                    <div class="s3-pills">
+                      <button class="s3-pill" id="s3-ch-dot" type="button">中心点</button>
+                      <button class="s3-pill" id="s3-ch-outline" type="button">描边</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
-          <div class="s3-cover-toggle">
-            <span>显示</span>
-            <button class="btn-ghost btn-sm" id="s3-fullscreen">全屏（F）</button>
+
+          <div class="s3-menu-foot">
+            <button class="btn-primary btn-lg" id="s3-start" disabled>初始化中…</button>
+            <div class="s3-foot-tools">
+              <button class="btn-ghost btn-sm" id="s3-fullscreen" type="button">全屏（F）</button>
+              <button class="btn-ghost btn-sm" id="s3-bench" type="button">性能自检</button>
+              <button class="btn-ghost btn-sm" id="s3-quit" type="button">退出</button>
+            </div>
+            <div class="s3-bench-out" id="s3-bench-out"></div>
+            <div class="s3-lastlog" id="s3-lastlog"></div>
           </div>
-          <div class="s3-cover-toggle" id="s3-count-row">
-            <span>本局敌人数量</span>
-            <button class="btn-ghost btn-sm" data-count="5">5</button>
-            <button class="btn-ghost btn-sm" data-count="10">10</button>
-            <button class="btn-ghost btn-sm" data-count="20">20</button>
-            <button class="btn-ghost btn-sm" data-count="999">不限</button>
-          </div>
-          <button class="btn-primary btn-lg" id="s3-start" disabled>初始化中…</button>
-          <button class="btn-ghost" id="s3-bench">性能自检</button>
-          <button class="btn-ghost" id="s3-quit">返回 2D 版</button>
-          <div class="s3-bench-out" id="s3-bench-out"></div>
-          <div class="s3-lastlog" id="s3-lastlog"></div>
         </div>
       </div>
       <div class="overlay hidden" id="s3-loading">
@@ -531,7 +666,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const hpEl = container.querySelector<HTMLElement>('#s3-hp')!;
   const bannerEl = container.querySelector<HTMLElement>('#s3-banner')!;
   const dmgLayer = container.querySelector<HTMLElement>('#s3-dmg')!;
-  const crosshairEl = container.querySelector<HTMLElement>('.s3-crosshair')!;
+  // 用 id 精确定位游戏内准星（主页预览里也有一个 .s3-crosshair，不能靠 class 抓）
+  const crosshairEl = container.querySelector<HTMLElement>('#s3-cross')!;
   const coverOnBtn = container.querySelector<HTMLButtonElement>('#s3-cover-on')!;
   const coverOffBtn = container.querySelector<HTMLButtonElement>('#s3-cover-off')!;
   const diffRow = container.querySelector<HTMLElement>('#s3-diff-row')!;
@@ -588,7 +724,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   let sessionTarget = Number(localStorage.getItem('jg.slice3d.count') ?? '10') || 10;
   const refreshCountButtons = (): void => {
     container.querySelectorAll<HTMLButtonElement>('[data-count]').forEach((b) => {
-      b.classList.toggle('btn-primary', Number(b.dataset.count) === sessionTarget);
+      b.classList.toggle('is-on', Number(b.dataset.count) === sessionTarget);
     });
   };
   refreshCountButtons();
@@ -626,7 +762,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     TACTICS[sliceDiff] ?? TACTICS.normal;
   const refreshDiffButtons = (): void => {
     diffRow.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach((b) => {
-      b.classList.toggle('btn-primary', b.dataset.diff === sliceDiff);
+      b.classList.toggle('is-on', b.dataset.diff === sliceDiff);
     });
   };
   refreshDiffButtons();
@@ -638,6 +774,135 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       showBanner(`难度：${DIFFICULTIES.find((d) => d.id === sliceDiff)?.name ?? sliceDiff}`);
     });
   });
+
+  /* ---------------- 主页单元③④：灵敏度 / 准星设置（真实生效 + 刷新后保持） ----------------
+   * 这两块不是"摆设面板"：
+   *   - 灵敏度直接决定鼠标转视角的角度换算（onMouseMove 读的就是 sensProfile）
+   *   - 准星设置写进容器上的 CSS 变量，游戏内准星和主页预览共用同一套变量
+   */
+  const SENS_KEY = 'jg.slice3d.sens';
+  const CH_KEY = 'jg.slice3d.crosshair';
+  const readStore = <T,>(key: string): T | null => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : null;
+    } catch {
+      return null;
+    }
+  };
+  const writeStore = (key: string, value: unknown): void => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // 存储被禁用也不影响本次设置生效
+    }
+  };
+  /** 当前灵敏度档：脏数据/越界值一律被 clampSens 夹回合法区间 */
+  let sensProfile: SensitivityProfile = clampSens(readStore<Partial<SensitivityProfile>>(SENS_KEY));
+  let crosshair: CrosshairStyle = clampCrosshair(readStore<Partial<CrosshairStyle>>(CH_KEY));
+
+  const sensRangeEl = container.querySelector<HTMLInputElement>('#s3-sens')!;
+  const sensValEl = container.querySelector<HTMLElement>('#s3-sens-val')!;
+  const dpiEl = container.querySelector<HTMLInputElement>('#s3-dpi')!;
+  const sensOutEl = container.querySelector<HTMLElement>('#s3-sens-out')!;
+  const presetRow = container.querySelector<HTMLElement>('#s3-preset-row')!;
+  const chColorsEl = container.querySelector<HTMLElement>('#s3-ch-colors')!;
+  const chSizeEl = container.querySelector<HTMLInputElement>('#s3-ch-size')!;
+  const chGapEl = container.querySelector<HTMLInputElement>('#s3-ch-gap')!;
+  const chThickEl = container.querySelector<HTMLInputElement>('#s3-ch-thick')!;
+  const chSizeVal = container.querySelector<HTMLElement>('#s3-ch-size-val')!;
+  const chGapVal = container.querySelector<HTMLElement>('#s3-ch-gap-val')!;
+  const chThickVal = container.querySelector<HTMLElement>('#s3-ch-thick-val')!;
+  const chDotBtn = container.querySelector<HTMLButtonElement>('#s3-ch-dot')!;
+  const chOutlineBtn = container.querySelector<HTMLButtonElement>('#s3-ch-outline')!;
+
+  /** 准星设置 → 容器 CSS 变量（游戏内准星 + 主页预览同时生效） */
+  const applyCrosshair = (): void => {
+    const vars = crosshairVars(crosshair);
+    for (const [k, v] of Object.entries(vars)) container.style.setProperty(k, v);
+  };
+  const refreshSensUI = (): void => {
+    sensRangeEl.value = String(sensProfile.sens);
+    sensValEl.textContent = sensProfile.sens.toFixed(2);
+    dpiEl.value = String(sensProfile.dpi);
+    presetRow
+      .querySelectorAll<HTMLButtonElement>('[data-preset]')
+      .forEach((b) => b.classList.toggle('is-on', b.dataset.preset === sensProfile.preset));
+    sensOutEl.textContent = `换算：${sensSummary(sensProfile)}`;
+  };
+  const refreshChUI = (): void => {
+    chSizeEl.value = String(crosshair.size);
+    chGapEl.value = String(crosshair.gap);
+    chThickEl.value = String(crosshair.thickness);
+    chSizeVal.textContent = String(crosshair.size);
+    chGapVal.textContent = String(crosshair.gap);
+    chThickVal.textContent = String(crosshair.thickness);
+    chDotBtn.classList.toggle('is-on', crosshair.dot);
+    chOutlineBtn.classList.toggle('is-on', crosshair.outline);
+    chColorsEl
+      .querySelectorAll<HTMLButtonElement>('.s3-swatch')
+      .forEach((b) => b.classList.toggle('is-on', (b.dataset.color ?? '').toLowerCase() === crosshair.color.toLowerCase()));
+    applyCrosshair();
+  };
+
+  presetRow.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((b) => {
+    b.addEventListener('click', () => {
+      sensProfile = withPreset(sensProfile, b.dataset.preset === 'valorant' ? 'valorant' : 'cs2');
+      writeStore(SENS_KEY, sensProfile);
+      refreshSensUI();
+    });
+  });
+  sensRangeEl.addEventListener('input', () => {
+    sensProfile = clampSens({ ...sensProfile, sens: Number(sensRangeEl.value) });
+    writeStore(SENS_KEY, sensProfile);
+    refreshSensUI();
+  });
+  dpiEl.addEventListener('change', () => {
+    sensProfile = clampSens({ ...sensProfile, dpi: Number(dpiEl.value) });
+    writeStore(SENS_KEY, sensProfile);
+    refreshSensUI();
+  });
+  chColorsEl.querySelectorAll<HTMLButtonElement>('.s3-swatch').forEach((b) => {
+    b.addEventListener('click', () => {
+      crosshair = clampCrosshair({ ...crosshair, color: b.dataset.color });
+      writeStore(CH_KEY, crosshair);
+      refreshChUI();
+    });
+  });
+  chSizeEl.addEventListener('input', () => {
+    crosshair = clampCrosshair({ ...crosshair, size: Number(chSizeEl.value) });
+    writeStore(CH_KEY, crosshair);
+    refreshChUI();
+  });
+  chGapEl.addEventListener('input', () => {
+    crosshair = clampCrosshair({ ...crosshair, gap: Number(chGapEl.value) });
+    writeStore(CH_KEY, crosshair);
+    refreshChUI();
+  });
+  chThickEl.addEventListener('input', () => {
+    crosshair = clampCrosshair({ ...crosshair, thickness: Number(chThickEl.value) });
+    writeStore(CH_KEY, crosshair);
+    refreshChUI();
+  });
+  chDotBtn.addEventListener('click', () => {
+    crosshair = clampCrosshair({ ...crosshair, dot: !crosshair.dot });
+    writeStore(CH_KEY, crosshair);
+    refreshChUI();
+  });
+  chOutlineBtn.addEventListener('click', () => {
+    crosshair = clampCrosshair({ ...crosshair, outline: !crosshair.outline });
+    writeStore(CH_KEY, crosshair);
+    refreshChUI();
+  });
+  // 场景单元：当前只有一个房间，点一下只是给个反馈（真正的多场景后面单独做）
+  container.querySelectorAll<HTMLButtonElement>('#s3-scene-row [data-scene]').forEach((b) => {
+    b.addEventListener('click', () => {
+      b.classList.add('is-on');
+      showBanner('场景：3D 训练房间');
+    });
+  });
+  refreshSensUI();
+  refreshChUI();
 
   /* ---------------- Three.js 初始化 ---------------- */
   // 抗锯齿（MSAA）在弱显卡/软件渲染路径上非常贵：只有高画质才开
@@ -803,8 +1068,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       playerCoverMeshes.push(wallMesh);
       room.walls.push(wallMesh); // 加入射线目标：玩家子弹会打在掩体上留弹孔
     }
-    coverOnBtn.classList.toggle('btn-primary', coverState.on);
-    coverOffBtn.classList.toggle('btn-primary', !coverState.on);
+    coverOnBtn.classList.toggle('is-on', coverState.on);
+    coverOffBtn.classList.toggle('is-on', !coverState.on);
     localStorage.setItem(COVER_KEY, coverState.on ? 'on' : 'off');
     rebuildColliders(); // 掩体是实体：增删后同步碰撞盒
   };
@@ -1197,6 +1462,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     ai: enemyAI,
     aimAt: debugAim,
     getBurst: () => burst,
+    /** 只读：当前视角角度（自检用来看"灵敏度到底有没有生效"） */
+    look: () => ({ yaw: +yaw.toFixed(4), pitch: +pitch.toFixed(4) }),
+    /** 只读：当前主页设置（自检用来核对菜单与运行时是否一致） */
+    settings: () => ({ sens: { ...sensProfile }, crosshair: { ...crosshair } }),
     rifle,
     parts: { mag: magPart, charging: chargingPart },
     perf: () => ({
@@ -1654,9 +1923,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
   const onMouseMove = (e: MouseEvent): void => {
     if (!running || document.pointerLockElement !== canvas) return;
-    const sens = 0.0022;
-    yaw -= e.movementX * sens;
-    pitch = Math.max(-1.1, Math.min(1.1, pitch - e.movementY * sens));
+    // 主页「灵敏度」单元真正生效的地方：按"每 1 个鼠标计数转多少度"换算。
+    // CS2 系数 0.022、Valorant 系数 0.07 —— 所以同样 sens 数值下两者手感不同。
+    const radPerCount = (sensDegreesPerCount(sensProfile) * Math.PI) / 180;
+    yaw -= e.movementX * radPerCount;
+    pitch = Math.max(-1.1, Math.min(1.1, pitch - e.movementY * radPerCount));
   };
   const onMouseDown = (e: MouseEvent): void => {
     if (e.button === 0) firing = true;
