@@ -62,6 +62,34 @@ const CONFIG = {
 };
 
 /**
+ * 材质工厂：弱显卡上 MeshStandardMaterial（PBR）太贵，
+ * 低/中画质统一用 MeshLambertMaterial（纯漫反射，几乎同样的观感但便宜很多）。
+ * 只在建场景时决定一次——运行时切材质会触发着色器重编译造成卡顿。
+ */
+let useStandardMaterials = true;
+function makeMat(params: {
+  color: number;
+  roughness?: number;
+  metalness?: number;
+  emissive?: number;
+  emissiveIntensity?: number;
+}): THREE.Material {
+  if (useStandardMaterials) {
+    return new THREE.MeshStandardMaterial({
+      color: params.color,
+      roughness: params.roughness ?? 0.8,
+      metalness: params.metalness ?? 0.05,
+      emissive: params.emissive ?? 0x000000,
+      emissiveIntensity: params.emissiveIntensity ?? 1,
+    });
+  }
+  return new THREE.MeshLambertMaterial({
+    color: params.color,
+    emissive: params.emissive ?? 0x000000,
+  });
+}
+
+/**
  * 难度 → 战术动作表（需求①）
  * peek：拉出身位范围（米）｜crouch：蹲下概率｜feint：假动作（先探再缩再出）
  * strafeShoot：拉出后横向移动射击｜coverChange：中途换掩体｜jitter：速度随机抖动比例
@@ -87,7 +115,7 @@ function buildRifle(): THREE.Group {
   const gun = new THREE.Group();
   const matMetal = new THREE.MeshStandardMaterial({ color: 0x3a424c, metalness: 0.85, roughness: 0.42 });
   const matPoly = new THREE.MeshStandardMaterial({ color: 0x22262b, metalness: 0.3, roughness: 0.75 });
-  const matWood = new THREE.MeshStandardMaterial({ color: 0x6b4a2c, metalness: 0.1, roughness: 0.85 });
+  const matWood = makeMat({ color: 0x6b4a2c, roughness: 0.85 });
   const matRed = new THREE.MeshStandardMaterial({ color: 0xb8352a, metalness: 0.2, roughness: 0.7 });
   const add = (
     parent: THREE.Object3D,
@@ -138,8 +166,8 @@ function buildRifle(): THREE.Group {
   add(gun, new THREE.BoxGeometry(0.02, 0.06, 0.03), matRed, 0.055, 0.02, -0.1);
 
   // 双手：用圆角柱体近似手套握持
-  const glove = new THREE.MeshStandardMaterial({ color: 0x3c4436, roughness: 0.9 });
-  const skin = new THREE.MeshStandardMaterial({ color: 0xd9a066, roughness: 0.8 });
+  const glove = makeMat({ color: 0x3c4436, roughness: 0.9 });
+  const skin = makeMat({ color: 0xd9a066, roughness: 0.8 });
   const handFront = add(gun, new THREE.BoxGeometry(0.09, 0.09, 0.14), glove, 0, -0.06, -0.62);
   handFront.rotation.z = 0.12;
   add(gun, new THREE.BoxGeometry(0.07, 0.05, 0.1), skin, 0, 0.0, -0.62);
@@ -161,15 +189,15 @@ function buildEnemy(): {
   rightArm: THREE.Mesh;
   head: THREE.Mesh;
   torso: THREE.Mesh;
-  materials: THREE.MeshStandardMaterial[];
+  materials: THREE.Material[];
 } {
   const group = new THREE.Group();
-  const clothes = new THREE.MeshStandardMaterial({ color: 0x39434f, roughness: 0.78, metalness: 0.05 });
-  const vest = new THREE.MeshStandardMaterial({ color: 0x232a33, roughness: 0.7 });
-  const pants = new THREE.MeshStandardMaterial({ color: 0x2b3037, roughness: 0.85 });
-  const skinMat = new THREE.MeshStandardMaterial({ color: 0xd7a271, roughness: 0.75 });
-  const hair = new THREE.MeshStandardMaterial({ color: 0x2b2118, roughness: 0.9 });
-  const red = new THREE.MeshStandardMaterial({ color: 0xc0392b, roughness: 0.7 });
+  const clothes = makeMat({ color: 0x39434f, roughness: 0.78 });
+  const vest = makeMat({ color: 0x232a33, roughness: 0.7 });
+  const pants = makeMat({ color: 0x2b3037, roughness: 0.85 });
+  const skinMat = makeMat({ color: 0xd7a271, roughness: 0.75 });
+  const hair = makeMat({ color: 0x2b2118, roughness: 0.9 });
+  const red = makeMat({ color: 0xc0392b, roughness: 0.7 });
 
   // 躯干 + 战术背心
   const torso = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.58, 0.26), clothes);
@@ -209,7 +237,7 @@ function buildEnemy(): {
   group.add(rightArm);
 
   // 手中的简易武器（提高剪影辨识度）
-  const gunMesh = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.5), new THREE.MeshStandardMaterial({ color: 0x15191d, roughness: 0.6 }));
+  const gunMesh = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.5), makeMat({ color: 0x15191d, roughness: 0.6 }));
   gunMesh.position.set(0.16, 1.12, -0.34);
   group.add(gunMesh);
 
@@ -253,10 +281,10 @@ function buildEnemy(): {
 function buildRoom(): { root: THREE.Group; walls: THREE.Mesh[] } {
   const root = new THREE.Group();
   const walls: THREE.Mesh[] = [];
-  const brick = new THREE.MeshStandardMaterial({ color: 0x9d8f79, roughness: 0.92, metalness: 0.02 });
-  const floorMat = new THREE.MeshStandardMaterial({ color: 0x3b3730, roughness: 0.95 });
-  const ceilMat = new THREE.MeshStandardMaterial({ color: 0x2a1e15, roughness: 0.9 });
-  const wood = new THREE.MeshStandardMaterial({ color: 0x6b4a2c, roughness: 0.85 });
+  const brick = makeMat({ color: 0x9d8f79, roughness: 0.92 });
+  const floorMat = makeMat({ color: 0x3b3730, roughness: 0.95 });
+  const ceilMat = makeMat({ color: 0x2a1e15, roughness: 0.9 });
+  const wood = makeMat({ color: 0x6b4a2c, roughness: 0.85 });
 
   // 地面 + 天花板
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(CONFIG.roomWidth, CONFIG.roomDepth), floorMat);
@@ -314,7 +342,7 @@ function buildRoom(): { root: THREE.Group; walls: THREE.Mesh[] } {
   walls.push(lowWall);
 
   // 场景道具：沙袋堆（左后）与壁灯（暖光）
-  const sandMat = new THREE.MeshStandardMaterial({ color: 0x6b6146, roughness: 0.95 });
+  const sandMat = makeMat({ color: 0x6b6146, roughness: 0.95 });
   for (let row = 0; row < 2; row++) {
     for (let i = 0; i < 3 - row; i++) {
       const bag = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 8), sandMat);
@@ -337,7 +365,7 @@ function buildRoom(): { root: THREE.Group; walls: THREE.Mesh[] } {
   root.add(lamp);
 
   // 正面掩体箱：敌人只从**玩家正面**的掩体后出现（门口 + 前侧），不再有身后刷新
-  const flankCrate = new THREE.MeshStandardMaterial({ color: 0x5f452c, roughness: 0.88 });
+  const flankCrate = makeMat({ color: 0x5f452c, roughness: 0.88 });
   for (const p of [
     { x: -3.8, z: -2.2 },
     { x: 3.8, z: -1.8 },
@@ -422,10 +450,16 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
    * 低：像素比 1 + 关阴影 + 关一盏点光（帧率优先）
    * 自动：进入后采样 3 秒，平均帧率 <45 自动降到"低" */
   type QualityLevel = 'high' | 'medium' | 'low';
-  let qualityLevel: QualityLevel = (localStorage.getItem('jg.slice3d.quality') as QualityLevel) || 'high';
-  let autoQuality = localStorage.getItem('jg.slice3d.quality') !== 'high' &&
-    localStorage.getItem('jg.slice3d.quality') !== 'medium' &&
-    localStorage.getItem('jg.slice3d.quality') !== 'low';
+  // 默认"中"：无阴影 + Lambert 材质 + 像素预算，保证弱显卡也能跑起来
+  const storedQuality = localStorage.getItem('jg.slice3d.quality');
+  let qualityLevel: QualityLevel =
+    storedQuality === 'high' || storedQuality === 'medium' || storedQuality === 'low' ? storedQuality : 'medium';
+  /** 最大渲染像素数：不随屏幕变大而爆炸（弱显卡的关键保护） */
+  const PIXEL_BUDGET: Record<QualityLevel, number> = { high: 2_100_000, medium: 1_000_000, low: 520_000 };
+  // 材质档位在建场景前决定：只有高画质用 PBR(Standard)，其余用 Lambert
+  useStandardMaterials = qualityLevel === 'high';
+  /** 首次进入（没有存过画质）时启用自动降档 */
+  let autoQuality = storedQuality === null;
 
   /* ---------------- 难度（需求①：影响战术丰富度） ---------------- */
   const DIFF_KEY = 'jg.slice3d.diff';
@@ -450,9 +484,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   /* ---------------- Three.js 初始化 ---------------- */
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   // 性能关键点①：像素比。高 DPI 屏上 2× 像素比 = 4 倍像素填充，是"卡"的头号原因
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  renderer.setPixelRatio(1);
   // 阴影在初始化时一次决定：运行中切换会触发全材质着色器重编译（表现为"画面卡住"）
-  renderer.shadowMap.enabled = qualityLevel !== 'low';
+  renderer.shadowMap.enabled = qualityLevel === 'high';
   // 性能关键点②：PCFSoft 是最贵的阴影过滤，改成 PCF
   renderer.shadowMap.type = THREE.PCFShadowMap;
 
@@ -469,8 +503,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   scene.add(new THREE.HemisphereLight(0xffe0b0, 0x1a1d22, 0.45));
   const sun = new THREE.DirectionalLight(0xffd2a0, 1.15);
   sun.position.set(7.5, 5.5, 3.5);
-  sun.castShadow = qualityLevel !== 'low';
-  sun.shadow.mapSize.set(qualityLevel === 'high' ? 1024 : 512, qualityLevel === 'high' ? 1024 : 512);
+  sun.castShadow = qualityLevel === 'high';
+  sun.shadow.mapSize.set(1024, 1024);
   sun.shadow.camera.near = 0.5;
   sun.shadow.camera.far = 40;
   sun.shadow.camera.left = -12;
@@ -587,7 +621,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
     if (coverState.on) {
       const c = CONFIG.playerCover;
-      const mat = new THREE.MeshStandardMaterial({ color: 0x8a8172, roughness: 0.92 });
+      const mat = makeMat({ color: 0x8a8172, roughness: 0.92 });
       const wallMesh = new THREE.Mesh(new THREE.BoxGeometry(c.w, c.h, c.d), mat);
       wallMesh.position.set(c.x, c.h / 2, c.z);
       wallMesh.castShadow = true;
@@ -772,6 +806,14 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const enemy = buildEnemy();
   scene.add(enemy.group);
 
+  /** 受击闪红：Standard 与 Lambert 材质都支持 emissive，这里统一安全处理 */
+  const flashEnemyMats = (hex: number): void => {
+    for (const m of enemy.materials) {
+      const emissive = (m as THREE.MeshStandardMaterial).emissive;
+      if (emissive) emissive.setHex(hex);
+    }
+  };
+
   type EnemyState = 'hidden' | 'feinting' | 'walking' | 'aiming' | 'dead';
   const enemyAI = {
     state: 'hidden' as EnemyState,
@@ -890,7 +932,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     enemy.rightArm.rotation.set(0, 0, 0);
     enemy.leftLeg.rotation.set(0, 0, 0);
     enemy.rightLeg.rotation.set(0, 0, 0);
-    enemy.materials.forEach((m) => m.emissive.setHex(0x000000));
+    flashEnemyMats(0x000000);
   };
   resetEnemy();
 
@@ -1135,8 +1177,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
             currentEncounter.firstShotHead = zone === 'head';
           }
         }
-        enemy.materials.forEach((m) => m.emissive.setHex(0x551111));
-        window.setTimeout(() => enemy.materials.forEach((m) => m.emissive.setHex(0x000000)), 110);
+        flashEnemyMats(0x551111);
+        window.setTimeout(() => flashEnemyMats(0x000000), 110);
         spawnSparks(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0), 6, bloodMat);
         if (zone === 'head') sfx.headshot();
         else sfx.hit();
@@ -1227,24 +1269,17 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   /* ---------------- 事件绑定 ---------------- */
   const onKeyDown = (e: KeyboardEvent): void => {
     keys.add(e.code);
+    // 吃掉浏览器默认行为（F1 帮助页之类）
+    if (['KeyP', 'KeyC', 'KeyR', 'KeyF', 'Tab'].includes(e.code)) e.preventDefault();
     if (e.code === 'KeyR') startReload();
     // F：网页内全屏（浏览器全屏 API，作用于 3D 容器）
     if (e.code === 'KeyF') void toggleFullscreen();
-    // F1/F2/F3：高/中/低画质（卡顿时一按就降）
-    if (e.code === 'F1') {
+    // P：循环切换画质（低 → 中 → 高）。不用 F1-F3，避免与浏览器快捷键冲突
+    if (e.code === 'KeyP') {
       autoQuality = false;
-      applyQuality('high');
-      showBanner('画质：高');
-    }
-    if (e.code === 'F2') {
-      autoQuality = false;
-      applyQuality('medium');
-      showBanner('画质：中');
-    }
-    if (e.code === 'F3') {
-      autoQuality = false;
-      applyQuality('low');
-      showBanner('画质：低（关阴影）');
+      const next: QualityLevel = qualityLevel === 'low' ? 'medium' : qualityLevel === 'medium' ? 'high' : 'low';
+      applyQuality(next);
+      showBanner(`画质：${next === 'low' ? '低（540p 级）' : next === 'medium' ? '中（100 万像素）' : '高（含阴影，需刷新页面生效）'}`);
     }
     // C：随时切换玩家掩体（有掩体 / 空旷场地）
     if (e.code === 'KeyC') {
@@ -1280,6 +1315,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const resize = (): void => {
     const w = container.clientWidth || window.innerWidth;
     const h = container.clientHeight || window.innerHeight;
+    // 关键：按"最大像素预算"决定渲染分辨率缩放——屏幕再大也不会把显卡压垮
+    const budget = PIXEL_BUDGET[qualityLevel];
+    const ideal = Math.sqrt(budget / Math.max(1, w * h));
+    const scale = Math.max(0.5, Math.min(window.devicePixelRatio, ideal));
+    renderer.setPixelRatio(scale);
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
@@ -1328,10 +1368,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const applyQuality = (level: QualityLevel): void => {
     qualityLevel = level;
     localStorage.setItem('jg.slice3d.quality', level);
-    // 运行时只改"渲染分辨率缩放"——不动阴影/材质，避免着色器重编译造成的卡死
-    const scale = level === 'low' ? 0.75 : level === 'medium' ? 1.1 : 1.5;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, scale));
     doorLight.intensity = level === 'low' ? 3 : 6;
+    // 运行时只改"渲染分辨率"——阴影/材质档位需要刷新页面才生效（避免着色器重编译卡顿）
     resize();
   };
   applyQuality(qualityLevel);
