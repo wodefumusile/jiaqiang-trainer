@@ -22,7 +22,7 @@ import { pushSession } from '../state/appStore';
 import type { EncounterRecord, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-0.4';
+const BUILD_STAMP = 'v3d-0.5';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -427,8 +427,33 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
             <span>显示</span>
             <button class="btn-ghost btn-sm" id="s3-fullscreen">全屏（F）</button>
           </div>
+          <div class="s3-cover-toggle">
+            <span>本局敌人数量</span>
+            <button class="btn-ghost btn-sm" data-count="5">5</button>
+            <button class="btn-ghost btn-sm" data-count="10">10</button>
+            <button class="btn-ghost btn-sm" data-count="20">20</button>
+            <button class="btn-ghost btn-sm" data-count="999">不限</button>
+          </div>
           <button class="btn-primary btn-lg" id="s3-start">点击进入</button>
           <button class="btn-ghost" id="s3-quit">返回 2D 版</button>
+        </div>
+      </div>
+      <div class="overlay hidden" id="s3-loading">
+        <div class="s3-card">
+          <h2>正在准备训练</h2>
+          <p id="s3-load-step">初始化…</p>
+          <div class="s3-progress"><i id="s3-progress-fill"></i></div>
+          <p class="s3-line" id="s3-load-pct">0%</p>
+        </div>
+      </div>
+      <div class="overlay hidden" id="s3-result">
+        <div class="s3-card">
+          <h2>训练成绩</h2>
+          <div class="s3-score" id="s3-score"></div>
+          <div class="row">
+            <button class="btn-primary" id="s3-again">再来一局</button>
+            <button class="btn-ghost" id="s3-back">返回设置</button>
+          </div>
         </div>
       </div>
     </div>
@@ -447,6 +472,31 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const diffRow = container.querySelector<HTMLElement>('#s3-diff-row')!;
   const fullscreenBtn = container.querySelector<HTMLButtonElement>('#s3-fullscreen')!;
   const perfEl = container.querySelector<HTMLElement>('#s3-perf')!;
+  const loadingOverlay = container.querySelector<HTMLElement>('#s3-loading')!;
+  const loadStepEl = container.querySelector<HTMLElement>('#s3-load-step')!;
+  const loadPctEl = container.querySelector<HTMLElement>('#s3-load-pct')!;
+  const progressFill = container.querySelector<HTMLElement>('#s3-progress-fill')!;
+  const resultOverlay = container.querySelector<HTMLElement>('#s3-result')!;
+  const scoreEl = container.querySelector<HTMLElement>('#s3-score')!;
+  const againBtn = container.querySelector<HTMLButtonElement>('#s3-again')!;
+  const backBtn = container.querySelector<HTMLButtonElement>('#s3-back')!;
+  const countRow = container.querySelector<HTMLElement>('.s3-cover-toggle:last-of-type')!;
+
+  /** 本局敌人数量（玩家开局前可选），999 = 不限 */
+  let sessionTarget = Number(localStorage.getItem('jg.slice3d.count') ?? '10') || 10;
+  const refreshCountButtons = (): void => {
+    container.querySelectorAll<HTMLButtonElement>('[data-count]').forEach((b) => {
+      b.classList.toggle('btn-primary', Number(b.dataset.count) === sessionTarget);
+    });
+  };
+  refreshCountButtons();
+  countRow.querySelectorAll<HTMLButtonElement>('[data-count]').forEach((b) => {
+    b.addEventListener('click', () => {
+      sessionTarget = Number(b.dataset.count) ?? 10;
+      localStorage.setItem('jg.slice3d.count', String(sessionTarget));
+      refreshCountButtons();
+    });
+  });
 
   /* ---------------- 画质档位（性能开关） ----------------
    * 高：像素比 ≤1.5 + 阴影 1024
@@ -807,8 +857,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   rifle.add(flashMesh);
 
   /* ---------------- 敌人 ---------------- */
-  const enemy = buildEnemy();
+  // 敌人实例池：开局前就把 N 个敌人建好并预热（避免运行中新建对象/现场编译着色器）
+  let enemy = buildEnemy();
   scene.add(enemy.group);
+  const enemyPool: ReturnType<typeof buildEnemy>[] = [enemy];
+  let enemyPoolIndex = 0;
 
   /** 受击闪红：Standard 与 Lambert 材质都支持 emissive，这里统一安全处理 */
   const flashEnemyMats = (hex: number): void => {
@@ -862,6 +915,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
   /** 让敌人从门后出现在门内（隐藏 → 走出门洞） */
   const resetEnemy = (): void => {
+    // 从预热好的池里轮换取下一个敌人（运行时不再新建对象）
+    if (enemyPool.length > 1) {
+      enemyPoolIndex = (enemyPoolIndex + 1) % enemyPool.length;
+      enemy = enemyPool[enemyPoolIndex];
+      for (const e of enemyPool) if (e !== enemy) e.group.visible = false;
+    }
     const t = tactics();
     // 需求①：只在视线之外、且离玩家 ≥4 米的位置刷新
     const cover = pickSpawnPoint();
@@ -985,6 +1044,20 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       blocked: +enemyAI.blocked.toFixed(2),
     }),
     deaths: () => stats.deaths,
+    kills: () => stats.kills,
+    poolSize: () => enemyPool.length,
+    /** 测试钩子：走与爆头击杀完全相同的结算链路（用于验证"打满即出成绩"） */
+    forceKill: () => {
+      if (enemyAI.state === 'dead') return;
+      enemyAI.hp = 0;
+      enemyAI.state = 'dead';
+      stats.kills++;
+      headshotCount++;
+      if (currentEncounter?.appearAt) reactionSamples.push(performance.now() - currentEncounter.appearAt);
+      killsEl.textContent = String(stats.kills);
+      closeEncounter(true);
+      if (sessionTarget < 999 && stats.kills >= sessionTarget) endSession();
+    },
     decals: () => decals.length,
     /** 穿模自检：敌人中心是否嵌入任何实体碰撞盒（半径 0.4 的 60% 容差） */
     enemyClipCheck: () => {
@@ -1059,8 +1132,14 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   let loopError = '';
   let longFrames = 0;
   let maxFrameMs = 0;
+  /** 本局是否已结算（结算后停止生成敌人） */
+  let sessionOver = false;
 
   const stats = { shots: 0, hits: 0, kills: 0, deaths: 0, startedEpoch: Date.now(), startedPerf: performance.now() };
+  // 本局统计（用于结算成绩）
+  let headshotCount = 0;
+  const reactionSamples: number[] = [];
+  let sessionStartAt = performance.now();
   const shotRecords: ShotRecord[] = [];
   const encounterRecords: EncounterRecord[] = [];
   let currentEncounter: Partial<EncounterRecord> | null = null;
@@ -1189,11 +1268,15 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         if (enemyAI.hp <= 0) {
           enemyAI.state = 'dead';
           stats.kills++;
+          if (zone === 'head') headshotCount++;
+          if (currentEncounter?.appearAt) reactionSamples.push(now - currentEncounter.appearAt);
           killsEl.textContent = String(stats.kills);
           sfx.killConfirm(stats.kills);
           showBanner(zone === 'head' ? '爆头击杀' : `击杀（${enemyAI.hp === 0 ? '身体' : ''}）`);
           spawnSparks(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0), 14, bloodMat);
           closeEncounter(true);
+          // 达成本局目标 → 出成绩
+          if (sessionTarget < 999 && stats.kills >= sessionTarget) endSession();
         }
       } else {
         addDecal(hits[0].point, hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0));
@@ -1378,11 +1461,109 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
   applyQuality(qualityLevel);
 
+  /** 一帧之后继续（让加载进度条能刷新出来，不阻塞界面） */
+  const nextFrame = (): Promise<void> =>
+    new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  const setProgress = (p: number, text: string): void => {
+    const pct = Math.round(Math.max(0, Math.min(1, p)) * 100);
+    progressFill.style.width = `${pct}%`;
+    loadPctEl.textContent = `${pct}%`;
+    loadStepEl.textContent = text;
+  };
+
+  /**
+   * 开局前加载：建满敌人池 → 逐个放到镜头前渲染（编译彩色/阴影深度着色器）
+   * → 预热命中特效。做完这些，运行中就不会再出现"现建对象/现场编译"的卡顿。
+   */
+  const loadSession = async (count: number): Promise<void> => {
+    while (enemyPool.length < count) {
+      const e = buildEnemy();
+      e.group.visible = false;
+      scene.add(e.group);
+      enemyPool.push(e);
+      setProgress((enemyPool.length / count) * 0.55, `构建敌人模型 ${enemyPool.length}/${count}`);
+      if (enemyPool.length % 3 === 0) await nextFrame();
+    }
+    for (let i = 0; i < enemyPool.length; i++) {
+      const e = enemyPool[i];
+      e.group.visible = true;
+      e.group.position.set(0, 0, camera.position.z - 3.5);
+      renderer.render(scene, camera);
+      e.group.visible = false;
+      e.group.position.set(0, 0, 0);
+      setProgress(0.55 + (i / Math.max(1, enemyPool.length)) * 0.35, `预编译着色器 ${i + 1}/${enemyPool.length}`);
+      await nextFrame();
+    }
+    setProgress(0.93, '预热命中特效…');
+    await nextFrame();
+    for (let i = 0; i < 6; i++) {
+      const spark = new THREE.Mesh(sparkGeo, bloodMat);
+      spark.position.set(0, 1.2, camera.position.z - 3);
+      scene.add(spark);
+      renderer.render(scene, camera);
+      scene.remove(spark);
+    }
+    setProgress(1, '准备完成');
+    await nextFrame();
+  };
+
+  /** 重置本局统计 */
+  const resetSessionStats = (): void => {
+    stats.shots = 0;
+    stats.hits = 0;
+    stats.kills = 0;
+    stats.deaths = 0;
+    stats.startedEpoch = Date.now();
+    stats.startedPerf = performance.now();
+    headshotCount = 0;
+    reactionSamples.length = 0;
+    sessionStartAt = performance.now();
+    killsEl.textContent = '0';
+    accEl.textContent = '--';
+    hpEl.textContent = '100';
+    ammoEl.textContent = String(RIFLE.magSize);
+    sessionOver = false;
+    resetEnemy();
+  };
+
+  /** 达成目标数量 → 结算成绩 */
+  const endSession = (): void => {
+    sessionOver = true;
+    running = false;
+    firing = false;
+    if (document.pointerLockElement === canvas) void document.exitPointerLock();
+    const dur = (performance.now() - sessionStartAt) / 1000;
+    const acc = stats.shots > 0 ? (stats.hits / stats.shots) * 100 : 0;
+    const hsRate = stats.kills > 0 ? (headshotCount / stats.kills) * 100 : 0;
+    const avgReact = reactionSamples.length
+      ? reactionSamples.reduce((a, b) => a + b, 0) / reactionSamples.length
+      : 0;
+    const rows: [string, string][] = [
+      ['击杀', `${stats.kills} / ${sessionTarget < 999 ? sessionTarget : '∞'}`],
+      ['爆头击杀率', `${hsRate.toFixed(1)}%`],
+      ['命中率', `${acc.toFixed(1)}%`],
+      ['平均反应', `${avgReact.toFixed(0)} ms`],
+      ['阵亡', String(stats.deaths)],
+      ['用时', `${dur.toFixed(1)} s`],
+    ];
+    scoreEl.innerHTML = rows
+      .map(([k, v]) => `<div class="s3-score-row"><span>${k}</span><b>${v}</b></div>`)
+      .join('');
+    resultOverlay.classList.remove('hidden');
+  };
+
   const start = (): void => {
     overlay.classList.add('hidden');
-    running = true;
-    lastT = performance.now();
-    canvas.requestPointerLock();
+    void (async () => {
+      // 开局前加载：预建敌人池 + 预热着色器/特效，加载完成后才真正开打
+      loadingOverlay.classList.remove('hidden');
+      await loadSession(Math.min(sessionTarget, 24));
+      loadingOverlay.classList.add('hidden');
+      resetSessionStats();
+      running = true;
+      lastT = performance.now();
+      canvas.requestPointerLock();
+    })();
   };
 
   const exit = (): void => {
@@ -1420,6 +1601,17 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   coverOffBtn.addEventListener('click', () => {
     coverState.on = false;
     applyCoverSetting();
+  });
+  againBtn.addEventListener('click', () => {
+    resultOverlay.classList.add('hidden');
+    resetSessionStats();
+    running = true;
+    lastT = performance.now();
+    canvas.requestPointerLock();
+  });
+  backBtn.addEventListener('click', () => {
+    resultOverlay.classList.add('hidden');
+    overlay.classList.remove('hidden');
   });
   container.querySelector<HTMLButtonElement>('#s3-quit')!.addEventListener('click', () => {
     running = false;
@@ -1547,7 +1739,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     const g = enemy.group;
     if (enemyAI.state === 'hidden') {
       enemyAI.timer -= dt;
-      if (enemyAI.timer <= 0) {
+      if (enemyAI.timer <= 0 && !sessionOver) {
         // 高难度先做假动作（探一下再缩回），再真正拉出
         enemyAI.state = enemyAI.feintPlan ? 'feinting' : 'walking';
         openEncounter();
