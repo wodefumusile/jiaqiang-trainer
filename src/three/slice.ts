@@ -470,6 +470,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const resolveXZ = (pos: THREE.Vector3, radius: number): boolean => {
     let hit = false;
     for (const box of colliders) {
+      // 只考虑与身体高度重叠的碰撞盒：
+      // 否则门楣（2.3~3.2m 高）会把门洞"封死"，敌人被卡在门口出不来
+      if (box.min.y > CONFIG.eyeHeight + 0.15 || box.max.y < 0.05) continue;
       const cx = Math.max(box.min.x, Math.min(pos.x, box.max.x));
       const cz = Math.max(box.min.z, Math.min(pos.z, box.max.z));
       let dx = pos.x - cx;
@@ -670,6 +673,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     feintPos: new THREE.Vector3(),
     coverPos: new THREE.Vector3(),
     waypoint: null as THREE.Vector3 | null,
+    path: [] as THREE.Vector3[],
     counters: { feints: 0, coverChanges: 0 },
     dieProgress: 0,
     walkPhase: 0,
@@ -718,7 +722,24 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     enemyAI.peekPos.set(enemyAI.peekTargetX, 0, cover.z + toward * (0.9 + Math.random() * 0.8));
     enemyAI.feintPos.set(cover.x + side * 0.35, 0, cover.z + toward * 0.35);
     // 门后刷新：先穿过门洞再拉出（否则会穿墙）
-    enemyAI.waypoint = cover.z < -6.4 ? new THREE.Vector3(0, 0, -6.0) : null;
+    // 路径规划（关键修复：不能直线穿掩体，否则会被碰撞卡死）
+    //  - 门后刷新：先走到门洞中线，再出门口拉出
+    //  - 其他掩体：先横移到掩体侧面边缘，再从侧面走出来（也正好是"横拉出掩体"的观感）
+    const path: THREE.Vector3[] = [];
+    if (cover.z < -6.4) {
+      path.push(new THREE.Vector3(0, 0, -6.0));
+    } else {
+      const box = nearestCollider(spawnX, spawnZ);
+      if (box) {
+        const c = box.getCenter(new THREE.Vector3());
+        const halfX = (box.max.x - box.min.x) / 2;
+        const edgeSign = Math.sign(enemyAI.peekTargetX - c.x) || 1;
+        const edgeX = c.x + edgeSign * (halfX + 0.55);
+        path.push(new THREE.Vector3(edgeX, 0, c.z)); // 侧移到掩体边缘
+        path.push(new THREE.Vector3(edgeX, 0, enemyAI.peekPos.z)); // 从边缘侧步出来
+      }
+    }
+    enemyAI.path = path;
     enemyAI.dieProgress = 0;
     enemy.group.visible = true;
     enemy.group.position.set(spawnX, 0, spawnZ);
@@ -1230,7 +1251,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       if (dist > 0.05) {
         dir.normalize();
         g.position.addScaledVector(dir, CONFIG.enemySpeed * 1.5 * enemyAI.speedJitter * dt);
-        resolveXZ(g.position, 0.4); // 敌人也撞不过掩体
+        // 注意：敌人的碰撞暂时关闭——严格碰撞会在掩体拐角处把敌人卡死（已实测）。
+        // 玩家侧掩体仍是实体（挡人挡弹）。敌人的正规寻路/侧步将在下一步统一实现。
         g.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI;
         enemyAI.walkPhase += dt * 9;
         const swing = Math.sin(enemyAI.walkPhase) * 0.5;
@@ -1268,13 +1290,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       }
     } else if (enemyAI.state === 'walking') {
       // 从掩体后走到拉出位（沿路径绕过掩体）
-      const target = enemyAI.waypoint ?? enemyAI.peekPos;
+      const target = enemyAI.path.length > 0 ? enemyAI.path[0] : enemyAI.peekPos;
       const dir = target.clone().sub(g.position);
       const dist = dir.length();
       if (dist > 0.06) {
         dir.normalize();
         g.position.addScaledVector(dir, CONFIG.enemySpeed * enemyAI.speedJitter * dt);
-        resolveXZ(g.position, 0.4); // 敌人绕行掩体（贴面滑动）
         // 离开掩体开始拉出时起身（除非本波战术要求保持蹲姿）
         if (!enemyAI.crouch) {
           if (g.scale.y < 1) {
@@ -1291,9 +1312,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         enemy.rightArm.rotation.x = swing * 0.6;
         g.position.y = Math.abs(Math.sin(enemyAI.walkPhase)) * 0.035;
       } else {
-        if (enemyAI.waypoint) {
-          // 到达中转点（门口）后继续走向拉出位
-          enemyAI.waypoint = null;
+        if (enemyAI.path.length > 0) {
+          // 到达中转点后继续走下一个点（先绕掩体，再拉出）
+          enemyAI.path.shift();
           return;
         }
         enemyAI.state = 'aiming';
