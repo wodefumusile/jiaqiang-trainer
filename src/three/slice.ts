@@ -46,13 +46,12 @@ const CONFIG = {
   moveSpeed: 3.4,
   /** 敌人拉出身位（米） */
   peekOffsets: [0.5, 1.0, 1.6, 2.4],
-  /** 刷新点：全部位于掩体/墙体"后面"（射线从玩家打到该点会被实体挡住） */
+  /** 刷新点：**只在玩家正面方向**（门口 + 前侧掩体），不再有身后/侧后刷新 */
   covers: [
     { id: '门后左', x: -1.8, z: -7.6 },
     { id: '门后右', x: 1.8, z: -7.6 },
-    { id: '左侧箱后', x: -4.2, z: 4.4 },
-    { id: '右侧箱后', x: 4.2, z: 4.0 },
-    { id: '后侧箱后', x: 0.2, z: 7.2 },
+    { id: '前左箱后', x: -3.8, z: -2.2 },
+    { id: '前右箱后', x: 3.8, z: -1.8 },
   ],
   /** 敌人停下后的开火前摇（秒） */
   enemyAimTime: [0.55, 0.95],
@@ -331,12 +330,11 @@ function buildRoom(): { root: THREE.Group; walls: THREE.Mesh[] } {
   lamp.position.set(CONFIG.roomWidth / 2 - 0.9, 2.5, -1.5);
   root.add(lamp);
 
-  // 侧后方掩体箱：给"视线外刷新"提供合理落点（玩家背后/侧翼）
+  // 正面掩体箱：敌人只从**玩家正面**的掩体后出现（门口 + 前侧），不再有身后刷新
   const flankCrate = new THREE.MeshStandardMaterial({ color: 0x5f452c, roughness: 0.88 });
   for (const p of [
-    { x: -4.2, z: 4.4 },
-    { x: 4.2, z: 4.0 },
-    { x: 0.2, z: 7.2 },
+    { x: -3.8, z: -2.2 },
+    { x: 3.8, z: -1.8 },
   ]) {
     // 高箱：站立的敌人也能完全藏在后面（顶面 1.95m > 敌人头顶 ~1.77m）
     const m = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.95, 1.5), flankCrate);
@@ -447,7 +445,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   // 性能关键点①：像素比。高 DPI 屏上 2× 像素比 = 4 倍像素填充，是"卡"的头号原因
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-  renderer.shadowMap.enabled = true;
+  // 阴影在初始化时一次决定：运行中切换会触发全材质着色器重编译（表现为"画面卡住"）
+  renderer.shadowMap.enabled = qualityLevel !== 'low';
   // 性能关键点②：PCFSoft 是最贵的阴影过滤，改成 PCF
   renderer.shadowMap.type = THREE.PCFShadowMap;
 
@@ -464,8 +463,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   scene.add(new THREE.HemisphereLight(0xffe0b0, 0x1a1d22, 0.45));
   const sun = new THREE.DirectionalLight(0xffd2a0, 1.15);
   sun.position.set(7.5, 5.5, 3.5);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(1024, 1024);
+  sun.castShadow = qualityLevel !== 'low';
+  sun.shadow.mapSize.set(qualityLevel === 'high' ? 1024 : 512, qualityLevel === 'high' ? 1024 : 512);
   sun.shadow.camera.near = 0.5;
   sun.shadow.camera.far = 40;
   sun.shadow.camera.left = -12;
@@ -603,14 +602,19 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const losRay = new THREE.Raycaster();
   const enemyHasLineOfSight = (): boolean => {
     if (playerCoverMeshes.length === 0) return true;
-    const from = new THREE.Vector3(enemy.group.position.x, 1.5, enemy.group.position.z);
-    const to = camera.position.clone();
-    const dir = to.clone().sub(from);
+    const from = _v1.set(enemy.group.position.x, 1.5, enemy.group.position.z);
+    const dir = _v2.copy(camera.position).sub(from);
     const dist = dir.length();
     losRay.set(from, dir.normalize());
     losRay.far = dist;
     return losRay.intersectObjects(playerCoverMeshes, false).length === 0;
   };
+
+  // 复用的临时向量：避免每帧 new 出一堆 Vector3（减少 GC 抖动/卡顿）
+  const _v1 = new THREE.Vector3();
+  const _v2 = new THREE.Vector3();
+  const _v3 = new THREE.Vector3();
+  const _v4 = new THREE.Vector3();
 
   /* ---------------- 敌人移动模型（更正版） ----------------
    * 目标不是"走向玩家"，而是**把枪线挪到玩家身上**：
@@ -618,9 +622,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
    *   · 全程身体与枪口朝玩家（不是朝移动方向）
    *   · 撞到实体沿面滑动，卡住则换下一个候选枪线位 */
   const enemyLineClear = (x: number, z: number): boolean => {
-    const from = new THREE.Vector3(x, 1.5, z);
-    const to = camera.position.clone();
-    const dir = to.clone().sub(from);
+    const from = _v1.set(x, 1.5, z);
+    const dir = _v2.copy(camera.position).sub(from);
     const dd = dir.length();
     losRay.set(from, dir.normalize());
     losRay.far = dd;
@@ -636,15 +639,15 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   /** 走向某点：带碰撞滑动；返回是否已到达。全程朝玩家 + 走路动画 */
   const moveEnemyTo = (target: THREE.Vector3, speed: number, dt: number): boolean => {
     const g = enemy.group;
-    const dir = new THREE.Vector3(target.x - g.position.x, 0, target.z - g.position.z);
+    const dir = _v1.set(target.x - g.position.x, 0, target.z - g.position.z);
     const dist = dir.length();
     if (dist < 0.15) return true;
     dir.normalize();
     g.position.addScaledVector(dir, speed * dt);
     const push = resolveXZ(g.position, 0.4);
     if (push.lengthSq() > 1e-6) {
-      const n = push.clone().normalize();
-      const tang = dir.clone().sub(n.clone().multiplyScalar(dir.dot(n)));
+      const n = _v2.copy(push).normalize();
+      const tang = _v3.copy(dir).sub(_v4.copy(n).multiplyScalar(dir.dot(n)));
       if (tang.lengthSq() > 1e-6) g.position.addScaledVector(tang.normalize(), speed * dt * 0.85);
     }
     facePlayer();
@@ -721,6 +724,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     const px = camera.position.x;
     const pz = camera.position.z;
     const valid = CONFIG.covers.filter((c) => {
+      // 硬性规则：只在玩家**正面**刷新（至少 1.5m 在前方），杜绝"从背后冒出来"
+      if (c.z > pz - 1.5) return false;
       if (Math.hypot(c.x - px, c.z - pz) < CONFIG.spawn.minDistance) return false;
       return !isVisibleFromPlayer(new THREE.Vector3(c.x, 0, c.z));
     });
@@ -799,6 +804,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     difficulty: 'normal',
     fallback: false,
     cameraY: 0,
+    x: 0,
+    z: 0,
   };
 
   /** 让敌人从门后出现在门内（隐藏 → 走出门洞） */
@@ -869,6 +876,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       difficulty: sliceDiff,
       fallback: cover.fallback,
       cameraY: +camera.position.y.toFixed(2),
+      x: +spawnX.toFixed(2),
+      z: +spawnZ.toFixed(2),
     };
     enemy.group.rotation.set(0, 0, 0);
     enemy.leftArm.rotation.set(0, 0, 0);
@@ -988,6 +997,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   let perfFrames = 0;
   let perfAccum = 0;
   const autoSamples: number[] = [];
+  let loopError = '';
+  let longFrames = 0;
 
   const stats = { shots: 0, hits: 0, kills: 0, deaths: 0, startedEpoch: Date.now(), startedPerf: performance.now() };
   const shotRecords: ShotRecord[] = [];
@@ -1272,6 +1283,14 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
   window.addEventListener('resize', resize);
   document.addEventListener('fullscreenchange', resize);
+  // WebGL 上下文丢失（显存/驱动问题会让画面彻底停住）：捕获并提示
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    loopError = 'WebGL 上下文丢失（显存或驱动问题）';
+  });
+  canvas.addEventListener('webglcontextrestored', () => {
+    loopError = '';
+  });
   // 容器尺寸变化也同步（例如进入全屏、布局变化）
   const ro = new ResizeObserver(() => resize());
   ro.observe(container);
@@ -1281,18 +1300,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const applyQuality = (level: QualityLevel): void => {
     qualityLevel = level;
     localStorage.setItem('jg.slice3d.quality', level);
-    const dpr =
-      level === 'low' ? 1 : level === 'medium' ? Math.min(window.devicePixelRatio, 1.25) : Math.min(window.devicePixelRatio, 1.5);
-    renderer.setPixelRatio(dpr);
-    const shadowsOn = level !== 'low';
-    renderer.shadowMap.enabled = shadowsOn;
-    sun.castShadow = shadowsOn;
-    if (level === 'high') sun.shadow.mapSize.set(1024, 1024);
-    else sun.shadow.mapSize.set(512, 512);
-    if (sun.shadow.map) {
-      sun.shadow.map.dispose();
-      sun.shadow.map = null;
-    }
+    // 运行时只改"渲染分辨率缩放"——不动阴影/材质，避免着色器重编译造成的卡死
+    const scale = level === 'low' ? 0.75 : level === 'medium' ? 1.1 : 1.5;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, scale));
     doorLight.intensity = level === 'low' ? 3 : 6;
     resize();
   };
@@ -1357,10 +1367,21 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
   /* ---------------- 主循环 ---------------- */
   const loop = (): void => {
+    // 先排下一帧：即使本帧逻辑抛异常，循环也不会中断（防止"画面卡住不动"）
     rafId = requestAnimationFrame(loop);
+    try {
+      step();
+    } catch (err) {
+      loopError = err instanceof Error ? err.message : String(err);
+    }
+  };
+
+  const step = (): void => {
     const now = performance.now();
     const dt = Math.min(0.05, (now - lastT) / 1000);
     lastT = now;
+    // 卡顿统计：单帧超过 400ms 记为一次长卡（用于判断是"持续低帧"还是"周期性卡死"）
+    if (dt > 0.4) longFrames++;
     if (!running) return;
 
     // —— 视角 ——
@@ -1500,6 +1521,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
             difficulty: sliceDiff,
             fallback: next.fallback,
             cameraY: +camera.position.y.toFixed(2),
+            x: +next.x.toFixed(2),
+            z: +next.z.toFixed(2),
           };
         }
         enemyAI.feintPlan = false;
@@ -1629,7 +1652,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       perfEl.textContent =
         `${fps.toFixed(0)} FPS · ${(1000 / Math.max(1, fps)).toFixed(1)} ms · ` +
         `${info.calls} draws · ${(info.triangles / 1000).toFixed(1)}k tri · ` +
-        `dpr ${renderer.getPixelRatio()} · 画质 ${qualityLevel === 'low' ? '低' : qualityLevel === 'medium' ? '中' : '高'}`;
+        `dpr ${renderer.getPixelRatio().toFixed(2)} · 画质 ${qualityLevel === 'low' ? '低' : qualityLevel === 'medium' ? '中' : '高'}` +
+        (longFrames > 0 ? ` · 长卡 ${longFrames}` : '') +
+        (loopError ? ` · 异常：${loopError}` : '');
       if (autoQuality && running) {
         autoSamples.push(fps);
         if (autoSamples.length >= 6) {
