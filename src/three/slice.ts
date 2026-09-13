@@ -31,7 +31,7 @@ import {
 import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-0.9';
+const BUILD_STAMP = 'v3d-0.9.1';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -208,6 +208,7 @@ const CROSSHAIR_HTML = `
                   <i class="ch-line ch-l"></i>
                   <i class="ch-line ch-r"></i>
                   <i class="ch-dot"></i>`;
+
 
 /** 程序化步枪：返回一个朝向 -Z 的枪组（坐标系：-Z 为枪口方向、+Y 为上） */
 function buildRifle(): THREE.Group {
@@ -579,7 +580,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
               </div>
               <div class="s3-readout" id="s3-sens-out">--</div>
               <p class="s3-hint">
-                想要"手感一致"：请关掉 Windows 的「提高指针精确度」，别用带加速曲线的鼠标驱动。
+                已自动请求原始输入（raw input）；若系统不支持，请关掉 Windows 的「提高指针精确度」，
+                否则快速甩枪时的位移会被系统放大。
               </p>
             </section>
 
@@ -711,12 +713,44 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
    * 关键：**失败只提示、绝不抛异常**——一旦抛出会打断 start() 流程，
    * 加载不执行、鼠标锁不上，表现就是"点击进入后动不了"（真实踩过的坑）。
    */
+  /** 当前环境是否不支持"原始输入"（raw input）——不支持就退回普通指针锁定 */
+  let rawInputUnsupported = false;
   const tryLock = (): void => {
+    // 环境不支持 raw input 时记住，之后一律走普通锁定（避免每次都要多失败一轮）
+    if (rawInputUnsupported) {
+      try {
+        canvas.requestPointerLock();
+      } catch {
+        // 忽略：点击画面会重试
+      }
+      return;
+    }
     try {
-      const p = canvas.requestPointerLock() as unknown as Promise<void> | undefined;
-      if (p && typeof p.catch === 'function') p.catch(() => undefined);
+      // 关键（手感/安全）：请求"原始输入" unadjustedMovement。
+      // 不开它的话，浏览器给我们的 movementX 是**经过系统鼠标加速处理**的位移，
+      // 于是"度/计数"的换算在快速甩枪时会被放大 —— 表现就是视角突然不受控地甩出去。
+      // 不支持该选项的环境会自动回退到普通锁定（下面 catch 里兜底）。
+      const p = (canvas.requestPointerLock as (o?: { unadjustedMovement?: boolean }) => unknown)({
+        unadjustedMovement: true,
+      }) as Promise<void> | undefined;
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          // 某些驱动/系统不支持 raw input：退回普通锁定，绝不抛异常打断进入流程
+          rawInputUnsupported = true;
+          try {
+            canvas.requestPointerLock();
+          } catch {
+            // 忽略：点击画面会重试
+          }
+        });
+      }
     } catch {
-      // 忽略：点击画面会重试
+      rawInputUnsupported = true;
+      try {
+        canvas.requestPointerLock();
+      } catch {
+        // 忽略：点击画面会重试
+      }
     }
   };
 
@@ -1482,6 +1516,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       recoveries,
       renders: renderFrames,
       sinceRenderMs: +(performance.now() - lastRenderDoneAt).toFixed(0),
+      spikes: spikeCount,
+      rawInput: !rawInputUnsupported,
       gpu: gpuName,
       gpuSoftware: gpuIsSoftware,
       antialias: qualityLevel === 'high',
@@ -1586,6 +1622,19 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const keys = new Set<string>();
   let yaw = 0;
   let pitch = 0;
+  /** 指针锁定刚拿到的时刻（前 120ms 的鼠标位移一律丢弃，防 pointer-lock jump） */
+  let lockAcquiredAt = 0;
+  /** 被夹掉的异常鼠标尖峰次数（HUD 会显示，用来判断是不是环境在制造脏数据） */
+  let spikeCount = 0;
+  /**
+   * 单次事件允许的最大计数（按 DPI 缩放）：同一个"物理甩枪速度"下，
+   * 高 DPI 鼠标的计数天然更大，所以不能写死一个常数。
+   * 800 DPI → 480 计数；3200 DPI → 1920 计数。
+   * 超过 3 倍上限的事件（800DPI 时 ≥1440 计数）几乎只可能是脏数据
+   * （切换指针锁定 / 跨屏 / 系统加速曲线 / 卡顿后合并的巨量位移）→ 直接丢弃；
+   * 介于两者之间的夹到上限，保证仍然能转向。
+   */
+  const mouseSpikeLimit = (): number => Math.max(256, Math.round(sensProfile.dpi * 0.6));
   let crouching = false;
   let firing = false;
   let ammo = RIFLE.magSize;
@@ -1923,11 +1972,28 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
   const onMouseMove = (e: MouseEvent): void => {
     if (!running || document.pointerLockElement !== canvas) return;
+    // 刚命中指针锁定的前 120ms 不采样：浏览器/系统在这时会补交一个很大的位移
+    // （经典的 pointer-lock jump），一进游戏视角猛地甩一下就是它。
+    if (performance.now() - lockAcquiredAt < 120) return;
     // 主页「灵敏度」单元真正生效的地方：按"每 1 个鼠标计数转多少度"换算。
     // CS2 系数 0.022、Valorant 系数 0.07 —— 所以同样 sens 数值下两者手感不同。
+    // 尖峰保护：正常一次鼠标事件只有几个~几十个计数，出现几百上千计数说明事件不干净。
+    // 直接把这种数据乘进灵敏度，就是"视角突然不受控地快速转动"（实测 5000 计数 = 甩 220°）。
+    const limit = mouseSpikeLimit();
+    const mx = Number.isFinite(e.movementX) ? e.movementX : 0;
+    const my = Number.isFinite(e.movementY) ? e.movementY : 0;
+    const huge = Math.abs(mx) > limit * 3 || Math.abs(my) > limit * 3;
+    if (huge) {
+      // 极其离谱的位移：整条丢弃，绝不换算成角度（宁可这一下不转，也不能甩出去）
+      spikeCount++;
+      if (spikeCount === 1) logEvent(`鼠标位移尖峰 ${Math.round(mx)}/${Math.round(my)} 计数（已丢弃）`);
+      return;
+    }
+    const dx = Math.max(-limit, Math.min(limit, mx));
+    const dy = Math.max(-limit, Math.min(limit, my));
     const radPerCount = (sensDegreesPerCount(sensProfile) * Math.PI) / 180;
-    yaw -= e.movementX * radPerCount;
-    pitch = Math.max(-1.1, Math.min(1.1, pitch - e.movementY * radPerCount));
+    yaw -= dx * radPerCount;
+    pitch = Math.max(-1.1, Math.min(1.1, pitch - dy * radPerCount));
   };
   const onMouseDown = (e: MouseEvent): void => {
     if (e.button === 0) firing = true;
@@ -2302,10 +2368,19 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     if (document.pointerLockElement !== canvas) tryLock();
   });
   document.addEventListener('pointerlockchange', () => {
+    if (document.pointerLockElement === canvas) {
+      // 记录锁定时刻：接下来的 120ms 内忽略鼠标位移（防锁定瞬间的补交位移）
+      lockAcquiredAt = performance.now();
+      return;
+    }
     if (running && document.pointerLockElement !== canvas) {
       overlay.classList.remove('hidden');
       running = false;
     }
+  });
+  // 指针锁定失败（含"不支持 raw input"）→ 下次点击改用普通锁定
+  document.addEventListener('pointerlockerror', () => {
+    rawInputUnsupported = true;
   });
 
   /* ---------------- 主循环 ---------------- */
@@ -2750,7 +2825,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         `${info.calls} draws · ${(info.triangles / 1000).toFixed(1)}k tri · ` +
         `dpr ${renderer.getPixelRatio().toFixed(2)} · 画质 ${qualityLevel === 'low' ? '低' : qualityLevel === 'medium' ? '中' : '高'}` +
         `\nGPU: ${gpuName}` +
+        ` · 鼠标输入 ${rawInputUnsupported ? '普通（系统加速可能介入）' : '原始'}` +
         (gpuIsSoftware ? ' ⚠ 软件渲染（未用显卡）' : '') +
+        (spikeCount > 0 ? ` · 位移尖峰 ${spikeCount}` : '') +
         (longFrames > 0 ? ` · 长卡 ${longFrames}` : '') +
         (loopError ? ` · 异常：${loopError}` : '');
       if (autoQuality && running) {
