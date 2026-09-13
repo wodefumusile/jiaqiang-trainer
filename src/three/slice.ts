@@ -22,7 +22,7 @@ import { pushSession } from '../state/appStore';
 import type { EncounterRecord, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-0.6';
+const BUILD_STAMP = 'v3d-0.7';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -70,6 +70,11 @@ const CONFIG = {
  * 只在建场景时决定一次——运行时切材质会触发着色器重编译造成卡顿。
  */
 let useStandardMaterials = true;
+/**
+ * 无光照材质模式（最低画质开启）：MeshBasicMaterial 不需要光照计算，
+ * 着色器最简单，能显著降低驱动层出问题（挂起/上下文丢失）的概率。
+ */
+let unlitMaterials = false;
 function makeMat(params: {
   color: number;
   roughness?: number;
@@ -77,6 +82,9 @@ function makeMat(params: {
   emissive?: number;
   emissiveIntensity?: number;
 }): THREE.Material {
+  if (unlitMaterials) {
+    return new THREE.MeshBasicMaterial({ color: params.color });
+  }
   if (useStandardMaterials) {
     return new THREE.MeshStandardMaterial({
       color: params.color,
@@ -553,6 +561,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const PIXEL_BUDGET: Record<QualityLevel, number> = { high: 2_100_000, medium: 1_000_000, low: 520_000 };
   // 材质档位在建场景前决定：只有高画质用 PBR(Standard)，其余用 Lambert
   useStandardMaterials = qualityLevel === 'high';
+  // 最低画质直接用无光照材质（着色器最简单）——给驱动减压，减少挂起概率
+  unlitMaterials = qualityLevel === 'low';
   /** 首次进入（没有存过画质）时启用自动降档 */
   let autoQuality = storedQuality === null;
 
@@ -951,6 +961,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     firingSpot: null as THREE.Vector3 | null,
     badSpots: [] as THREE.Vector3[],
     stallT: 0,
+    /** 跟随路径点时的"无进展计时"（防止敌人被掩体挡住后永远卡在走路状态） */
+    pathStallT: 0,
     counters: { feints: 0, coverChanges: 0 },
     dieProgress: 0,
     walkPhase: 0,
@@ -1029,6 +1041,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     enemyAI.firingSpot = null;
     enemyAI.badSpots = [];
     enemyAI.stallT = 0;
+    enemyAI.pathStallT = 0;
     enemyAI.dieProgress = 0;
     enemy.group.visible = true;
     enemy.group.position.set(spawnX, 0, spawnZ);
@@ -1064,7 +1077,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     pitch = Math.atan2(dy, Math.hypot(dx, dz));
   };
   (window as unknown as { __slice3d?: unknown }).__slice3d = {
-    enemy,
+    // 注意：敌人是从对象池里轮换的（resetEnemy 会重新赋值 enemy），
+    // 这里必须用 getter 取"当前这一个"，否则自检脚本读到的是过期对象
+    // （曾经导致自检数据看着正常、实际测的是不动的那个敌人）。
+    get enemy() {
+      return enemy;
+    },
     camera,
     scene,
     ai: enemyAI,
@@ -1084,6 +1102,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       maxFrameMs: +maxFrameMs.toFixed(1),
       loopError,
       recoveries,
+      renders: renderFrames,
+      sinceRenderMs: +(performance.now() - lastRenderDoneAt).toFixed(0),
       gpu: gpuName,
       gpuSoftware: gpuIsSoftware,
       antialias: qualityLevel === 'high',
@@ -1203,6 +1223,16 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   let benchSamples: number[] = [];
   /** 看门狗：记录最后一次真实渲染的时刻（用于检测"冻结"并自动恢复） */
   let lastLoopTick = performance.now();
+  let lastRenderedAt = performance.now();
+  /**
+   * 真实渲染帧计数（诊断用）。
+   * 关键点：主循环在跑 ≠ 画面在更新。只要 step() 里有任何一个提前 return
+   * 绕过 renderer.render()，画面就会"定格"，而看门狗（只看主循环心跳）
+   * 完全检测不到——必须单独统计真正的渲染次数。
+   */
+  let renderFrames = 0;
+  /** 最后一次"真正调到 renderer.render()"的时刻（与上面的帧率门限含义不同） */
+  let lastRenderDoneAt = performance.now();
   let recoveries = Number(localStorage.getItem('jg.slice3d.recoveries') ?? '0') || 0;
   let recovering = false;
   /**
@@ -1575,8 +1605,25 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
    * 超过 2.5 秒没有任何一帧 → 判定冻结并自动恢复（这是"卡住就无法恢复"的根治手段）。
    */
   const watchdog = window.setInterval(() => {
-    if (recovering || !running) return;
-    if (performance.now() - lastLoopTick > 2500) recover('检测到画面冻结');
+    if (recovering) return;
+    const t = performance.now();
+    // 加载阶段：rAF 被冻住会让进度条永远停住（既进不去游戏、也不会报任何错）
+    if (!running) {
+      if (!loadingOverlay.classList.contains('hidden') && t - lastLoopTick > 6000) {
+        recover('加载阶段停摆（浏览器没有送帧）');
+      }
+      return;
+    }
+    // 心跳 1：主循环本身停了（浏览器没送帧 / 显卡挂起）
+    if (t - lastLoopTick > 2500) {
+      recover('主循环停摆（浏览器没有送帧）');
+      return;
+    }
+    // 心跳 2：主循环在跑，但画面根本没更新（step() 里有代码提前 return 跳过了渲染）。
+    // 这一路就是为了兜住"画面定格但一切看起来正常、看门狗也检测不到"的那类 Bug。
+    if (t - lastRenderDoneAt > 2000) {
+      recover('渲染停摆（主循环在跑但画面没更新）');
+    }
   }, 1000);
   void watchdog;
   // 容器尺寸变化也同步（例如进入全屏、布局变化）
@@ -1610,6 +1657,22 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   /** 一帧之后继续（让加载进度条能刷新出来，不阻塞界面） */
   const nextFrame = (): Promise<void> =>
     new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  /**
+   * 加载专用的"等一下"：优先等下一帧，但如果浏览器**没有送帧**
+   * （显卡/合成器卡住、rAF 被冻），最多等 500ms 就用定时器继续。
+   * 目的：把"永远卡在加载进度条"变成"加载慢一点但一定走得完"。
+   */
+  const nextFrameOrTimeout = (ms = 500): Promise<void> =>
+    new Promise((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      requestAnimationFrame(finish);
+      window.setTimeout(finish, ms);
+    });
   const setProgress = (p: number, text: string): void => {
     const pct = Math.round(Math.max(0, Math.min(1, p)) * 100);
     progressFill.style.width = `${pct}%`;
@@ -1628,7 +1691,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       scene.add(e.group);
       enemyPool.push(e);
       setProgress((enemyPool.length / count) * 0.55, `构建敌人模型 ${enemyPool.length}/${count}`);
-      if (enemyPool.length % 3 === 0) await nextFrame();
+      if (enemyPool.length % 3 === 0) await nextFrameOrTimeout();
     }
     for (let i = 0; i < enemyPool.length; i++) {
       const e = enemyPool[i];
@@ -1638,10 +1701,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       e.group.visible = false;
       e.group.position.set(0, 0, 0);
       setProgress(0.55 + (i / Math.max(1, enemyPool.length)) * 0.35, `预编译着色器 ${i + 1}/${enemyPool.length}`);
-      await nextFrame();
+      await nextFrameOrTimeout();
     }
     setProgress(0.93, '预热命中特效…');
-    await nextFrame();
+    await nextFrameOrTimeout();
     for (let i = 0; i < 6; i++) {
       const spark = new THREE.Mesh(sparkGeo, bloodMat);
       spark.position.set(0, 1.2, camera.position.z - 3);
@@ -1650,7 +1713,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       scene.remove(spark);
     }
     setProgress(1, '准备完成');
-    await nextFrame();
+    await nextFrameOrTimeout();
   };
 
   /** 重置本局统计 */
@@ -1855,9 +1918,14 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
   const step = (): void => {
     const now = performance.now();
+    lastLoopTick = now; // 看门狗心跳
+    // 帧率上限 60：高刷屏上不必让显卡跑 144+ 帧，能明显降低驱动层挂起的概率
+    // 关键：被跳过的这一段**不能**推进 lastT，否则那段时间就丢了，
+    // 高刷屏（120/144Hz）上游戏会变成半速/变速——所以先判门限，再算 dt。
+    if (now - lastRenderedAt < 15.5) return;
+    lastRenderedAt = now;
     const dt = Math.min(0.05, (now - lastT) / 1000);
     lastT = now;
-    lastLoopTick = now; // 看门狗心跳
     // 单帧超过 1.2 秒：视为"危险帧"（可能是驱动挂起前兆），立刻降到最低画质并记录
     if (dt >= 0.9) {
       longFrames++;
@@ -1967,7 +2035,14 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     }
 
     // —— 敌人 AI：等待 → 走出门洞（拉出）→ 停下瞄准 → 开火 ——
-    const g = enemy.group;
+    // 【血泪教训 · 画面定格的真凶】
+    // 这段 AI 逻辑里原来有一句 `return;`（"跟随路径点时本帧不再做别的"），
+    // 在原来的写法下它会直接 return 出整个 step()，把结尾的 renderer.render()
+    // 一起跳过 —— 表现就是：画面永久定格、而主循环心跳照常更新（看门狗检测不到）、
+    // 控制台没有任何报错、ESC 还能正常响应。
+    // 包成 IIFE 之后，AI 内部的 return 只退出这一小段 AI 更新，渲染永远不会被跳过。
+    void ((): void => {
+      const g = enemy.group;
     if (enemyAI.state === 'hidden') {
       enemyAI.timer -= dt;
       if (enemyAI.timer <= 0 && !sessionOver) {
@@ -2027,7 +2102,19 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       const speed = CONFIG.enemySpeed * enemyAI.speedJitter;
       // 1) 门后刷新：先穿门洞（中转点）
       if (enemyAI.path.length > 0) {
-        if (moveEnemyTo(enemyAI.path[0], speed, dt)) enemyAI.path.shift();
+        const wp = enemyAI.path[0];
+        const dBefore = Math.hypot(wp.x - g.position.x, wp.z - g.position.z);
+        if (moveEnemyTo(wp, speed, dt)) enemyAI.path.shift();
+        const dAfter = Math.hypot(wp.x - g.position.x, wp.z - g.position.z);
+        // 路径点被别的掩体挡住 / 卡在角落永远走不到时，1.5 秒没进展就丢掉这个点。
+        // 否则敌人会永远停在"走路"状态：既不出场也不开火（曾经 = 玩家干等）。
+        enemyAI.pathStallT = dAfter < dBefore - 0.02 ? 0 : enemyAI.pathStallT + dt;
+        if (enemyAI.pathStallT > 1.5) {
+          enemyAI.pathStallT = 0;
+          enemyAI.path.shift();
+        }
+        // 这里允许 return：它只退出本帧的 AI 更新（IIFE 内部），
+        // 不会再跳过 step() 结尾的 renderer.render()。
         return;
       }
       // 2) 横向侧步到"能看见玩家"的枪线位
@@ -2121,6 +2208,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         if (enemyAI.timer > 1.0) resetEnemy();
       }
     }
+    })();
 
     // 注意：不显示敌人血条——它会透过掩体暴露敌人位置（命中反馈用受击红闪/血雾/伤害数字）
 
@@ -2170,6 +2258,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       perfAccum = 0;
     }
     renderer.render(scene, camera);
+    renderFrames++; // 诊断：真实出图计数（看门狗的另一路心跳）
+    lastRenderDoneAt = performance.now();
   };
   rafId = requestAnimationFrame(loop);
 
