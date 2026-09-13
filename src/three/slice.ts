@@ -360,6 +360,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         <div class="s3-title">3D 试验版 · 垂直切片</div>
         <div class="s3-line">鼠标转视角 · WASD 移动 · Ctrl 下蹲</div>
         <div class="s3-line">按住左键连发 · R 换弹 · Esc 退出</div>
+        <div class="s3-line">F 全屏 · C 掩体 · F1-F3 画质</div>
+        <div class="s3-line s3-perf" id="s3-perf">--</div>
       </div>
       <div class="s3-hud s3-right">
         <div class="s3-line">击杀 <b id="s3-kills">0</b></div>
@@ -408,6 +410,18 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const coverOffBtn = container.querySelector<HTMLButtonElement>('#s3-cover-off')!;
   const diffRow = container.querySelector<HTMLElement>('#s3-diff-row')!;
   const fullscreenBtn = container.querySelector<HTMLButtonElement>('#s3-fullscreen')!;
+  const perfEl = container.querySelector<HTMLElement>('#s3-perf')!;
+
+  /* ---------------- 画质档位（性能开关） ----------------
+   * 高：像素比 ≤1.5 + 阴影 1024
+   * 中：像素比 ≤1.25 + 阴影 512
+   * 低：像素比 1 + 关阴影 + 关一盏点光（帧率优先）
+   * 自动：进入后采样 3 秒，平均帧率 <45 自动降到"低" */
+  type QualityLevel = 'high' | 'medium' | 'low';
+  let qualityLevel: QualityLevel = (localStorage.getItem('jg.slice3d.quality') as QualityLevel) || 'high';
+  let autoQuality = localStorage.getItem('jg.slice3d.quality') !== 'high' &&
+    localStorage.getItem('jg.slice3d.quality') !== 'medium' &&
+    localStorage.getItem('jg.slice3d.quality') !== 'low';
 
   /* ---------------- 难度（需求①：影响战术丰富度） ---------------- */
   const DIFF_KEY = 'jg.slice3d.diff';
@@ -431,9 +445,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
   /* ---------------- Three.js 初始化 ---------------- */
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // 性能关键点①：像素比。高 DPI 屏上 2× 像素比 = 4 倍像素填充，是"卡"的头号原因
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // 性能关键点②：PCFSoft 是最贵的阴影过滤，改成 PCF
+  renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0d0f12);
@@ -880,6 +896,19 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     getBurst: () => burst,
     rifle,
     parts: { mag: magPart, charging: chargingPart },
+    perf: () => ({
+      fps: +(perfFrames / Math.max(0.001, perfAccum)).toFixed(1),
+      quality: qualityLevel,
+      dpr: renderer.getPixelRatio(),
+      calls: renderer.info.render.calls,
+      triangles: renderer.info.render.triangles,
+      shadows: renderer.shadowMap.enabled,
+      buffer: [renderer.domElement.width, renderer.domElement.height],
+    }),
+    setQuality: (q: 'high' | 'medium' | 'low') => {
+      autoQuality = false;
+      applyQuality(q);
+    },
     reloadState: () => ({ reloading, magY: +magPart.position.y.toFixed(3), chargeZ: +chargingPart.position.z.toFixed(3) }),
     coverState: () => ({
       on: coverState.on,
@@ -956,6 +985,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   let running = false;
   let rafId = 0;
   let lastT = performance.now();
+  let perfFrames = 0;
+  let perfAccum = 0;
+  const autoSamples: number[] = [];
 
   const stats = { shots: 0, hits: 0, kills: 0, deaths: 0, startedEpoch: Date.now(), startedPerf: performance.now() };
   const shotRecords: ShotRecord[] = [];
@@ -1171,6 +1203,22 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     if (e.code === 'KeyR') startReload();
     // F：网页内全屏（浏览器全屏 API，作用于 3D 容器）
     if (e.code === 'KeyF') void toggleFullscreen();
+    // F1/F2/F3：高/中/低画质（卡顿时一按就降）
+    if (e.code === 'F1') {
+      autoQuality = false;
+      applyQuality('high');
+      showBanner('画质：高');
+    }
+    if (e.code === 'F2') {
+      autoQuality = false;
+      applyQuality('medium');
+      showBanner('画质：中');
+    }
+    if (e.code === 'F3') {
+      autoQuality = false;
+      applyQuality('low');
+      showBanner('画质：低（关阴影）');
+    }
     // C：随时切换玩家掩体（有掩体 / 空旷场地）
     if (e.code === 'KeyC') {
       coverState.on = !coverState.on;
@@ -1228,6 +1276,27 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const ro = new ResizeObserver(() => resize());
   ro.observe(container);
   resize();
+
+  /** 应用画质档位（改像素比/阴影/灯光强度，并立即重算画布尺寸） */
+  const applyQuality = (level: QualityLevel): void => {
+    qualityLevel = level;
+    localStorage.setItem('jg.slice3d.quality', level);
+    const dpr =
+      level === 'low' ? 1 : level === 'medium' ? Math.min(window.devicePixelRatio, 1.25) : Math.min(window.devicePixelRatio, 1.5);
+    renderer.setPixelRatio(dpr);
+    const shadowsOn = level !== 'low';
+    renderer.shadowMap.enabled = shadowsOn;
+    sun.castShadow = shadowsOn;
+    if (level === 'high') sun.shadow.mapSize.set(1024, 1024);
+    else sun.shadow.mapSize.set(512, 512);
+    if (sun.shadow.map) {
+      sun.shadow.map.dispose();
+      sun.shadow.map = null;
+    }
+    doorLight.intensity = level === 'low' ? 3 : 6;
+    resize();
+  };
+  applyQuality(qualityLevel);
 
   const start = (): void => {
     overlay.classList.add('hidden');
@@ -1550,6 +1619,34 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     }
 
     accEl.textContent = stats.shots > 0 ? `${Math.round((stats.hits / stats.shots) * 100)}%` : '--';
+
+    // —— 性能采样：FPS / 帧时间 / 绘制批次 + 自动降画质 ——
+    perfFrames++;
+    perfAccum += dt;
+    if (perfAccum >= 0.5) {
+      const fps = perfFrames / perfAccum;
+      const info = renderer.info.render;
+      perfEl.textContent =
+        `${fps.toFixed(0)} FPS · ${(1000 / Math.max(1, fps)).toFixed(1)} ms · ` +
+        `${info.calls} draws · ${(info.triangles / 1000).toFixed(1)}k tri · ` +
+        `dpr ${renderer.getPixelRatio()} · 画质 ${qualityLevel === 'low' ? '低' : qualityLevel === 'medium' ? '中' : '高'}`;
+      if (autoQuality && running) {
+        autoSamples.push(fps);
+        if (autoSamples.length >= 6) {
+          const avg = autoSamples.reduce((a, b) => a + b, 0) / autoSamples.length;
+          if (avg < 45 && qualityLevel === 'high') {
+            applyQuality('medium');
+            showBanner(`帧率 ${avg.toFixed(0)}，已自动降到中等画质`);
+          } else if (avg < 40 && qualityLevel === 'medium') {
+            applyQuality('low');
+            showBanner(`帧率 ${avg.toFixed(0)}，已自动降到低画质（关阴影）`);
+          }
+          autoSamples.length = 0;
+        }
+      }
+      perfFrames = 0;
+      perfAccum = 0;
+    }
     renderer.render(scene, camera);
   };
   rafId = requestAnimationFrame(loop);

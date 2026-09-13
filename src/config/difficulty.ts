@@ -1,5 +1,3 @@
-import type { SceneConfig } from '../types';
-
 export interface DifficultyConfig {
   id: string;
   name: string;
@@ -89,33 +87,4 @@ export const DIFFICULTIES: DifficultyConfig[] = [
 
 export function difficultyById(id: string): DifficultyConfig {
   return DIFFICULTIES.find((d) => d.id === id) ?? DIFFICULTIES[1];
-}
-
-export interface EffectiveEnemy {
-  speed: number;
-  headR: number;
-  bodyW: number;
-  bodyH: number;
-  waitMin: number;
-  waitMax: number;
-  moveDir: 1 | -1;
-  jitter: number;
-  bobAmp: number;
-  attackMul: number;
-}
-
-/** 把难度参数应用到场景敌人配置上，得到训练实际使用的敌人参数 */
-export function effectiveEnemy(scene: SceneConfig, d: DifficultyConfig): EffectiveEnemy {
-  return {
-    speed: scene.enemy.speed * d.speedMul,
-    headR: scene.enemy.headR * d.headMul,
-    bodyW: scene.enemy.bodyW,
-    bodyH: scene.enemy.bodyH,
-    waitMin: scene.enemy.waitMin * d.waitMul,
-    waitMax: scene.enemy.waitMax * d.waitMul,
-    moveDir: scene.moveDir,
-    jitter: d.jitter,
-    bobAmp: d.bobAmp,
-    attackMul: d.attackMul,
-  };
 }

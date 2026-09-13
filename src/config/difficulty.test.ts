@@ -1,33 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { DIFFICULTIES, difficultyById, effectiveEnemy } from './difficulty';
-import { SCENES } from '../scenes/registry';
+import { DIFFICULTIES, difficultyById } from './difficulty';
 
-describe('difficulty 难度参数', () => {
-  const scene = SCENES[0];
-
-  it('普通难度保持场景原始参数', () => {
-    const e = effectiveEnemy(scene, difficultyById('normal'));
-    expect(e.speed).toBe(scene.enemy.speed);
-    expect(e.headR).toBe(scene.enemy.headR);
-    expect(e.waitMin).toBe(scene.enemy.waitMin);
-    expect(e.waitMax).toBe(scene.enemy.waitMax);
-  });
-
-  it('职业难度更快、更小、更突然', () => {
-    const e = effectiveEnemy(scene, difficultyById('insane'));
-    expect(e.speed).toBeGreaterThan(scene.enemy.speed);
-    expect(e.headR).toBeLessThan(scene.enemy.headR);
-    expect(e.waitMax).toBeLessThan(scene.enemy.waitMax);
-  });
-
-  it('入门难度更慢、更大、更宽松', () => {
-    const e = effectiveEnemy(scene, difficultyById('easy'));
-    expect(e.speed).toBeLessThan(scene.enemy.speed);
-    expect(e.headR).toBeGreaterThan(scene.enemy.headR);
-    expect(e.waitMax).toBeGreaterThan(scene.enemy.waitMax);
-  });
-
-  it('四档难度齐全且未知 id 回退普通', () => {
+describe('difficulty 难度档位', () => {
+  it('六档齐全且顺序正确', () => {
     expect(DIFFICULTIES.map((d) => d.id)).toEqual([
       'easy',
       'normal',
@@ -36,20 +11,20 @@ describe('difficulty 难度参数', () => {
       'master',
       'extreme',
     ]);
+  });
+
+  it('未知 id 回退普通难度', () => {
     expect(difficultyById('nope').id).toBe('normal');
   });
 
-  it('高难度档位引入变速抖动与头部晃动', () => {
+  it('难度越高：目标更快更小、敌人开火更快、抖动与晃头更强', () => {
+    const easy = difficultyById('easy');
     const extreme = difficultyById('extreme');
-    const normal = difficultyById('normal');
-    expect(extreme.speedMul).toBeGreaterThan(normal.speedMul);
-    expect(extreme.headMul).toBeLessThan(normal.headMul);
-    expect(extreme.waitMul).toBeLessThan(normal.waitMul);
-    expect(extreme.jitter).toBeGreaterThan(normal.jitter);
-    expect(extreme.bobAmp).toBeGreaterThan(normal.bobAmp);
-    const e = effectiveEnemy(SCENES[0], extreme);
-    expect(e.jitter).toBeGreaterThan(0);
-    expect(e.bobAmp).toBeGreaterThan(0);
-    expect(e.attackMul).toBeLessThan(difficultyById('normal').attackMul);
+    expect(extreme.speedMul).toBeGreaterThan(easy.speedMul);
+    expect(extreme.headMul).toBeLessThan(easy.headMul);
+    expect(extreme.waitMul).toBeLessThan(easy.waitMul);
+    expect(extreme.jitter).toBeGreaterThan(easy.jitter);
+    expect(extreme.bobAmp).toBeGreaterThan(easy.bobAmp);
+    expect(extreme.attackMul).toBeLessThan(easy.attackMul);
   });
 });
