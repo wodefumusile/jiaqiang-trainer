@@ -461,6 +461,78 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const room = buildRoom();
   scene.add(room.root);
 
+  /* ---------------- 实体碰撞（掩体/墙体：挡人 + 挡子弹） ----------------
+   * 从场景真实网格计算 AABB，玩家与敌人都用同一套碰撞盒做 XZ 平面推挤，
+   * 子弹则在 room.walls 上做射线（掩体是实体，打上去留弹孔）。 */
+  let colliders: THREE.Box3[] = [];
+  const rebuildColliders = (): void => {
+    colliders = room.walls.map((m) => new THREE.Box3().setFromObject(m));
+  };
+  /** 把圆柱体（半径 radius）推出所有碰撞盒；返回是否发生过碰撞 */
+  const resolveXZ = (pos: THREE.Vector3, radius: number): boolean => {
+    let hit = false;
+    for (const box of colliders) {
+      const cx = Math.max(box.min.x, Math.min(pos.x, box.max.x));
+      const cz = Math.max(box.min.z, Math.min(pos.z, box.max.z));
+      let dx = pos.x - cx;
+      let dz = pos.z - cz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > radius * radius) continue;
+      hit = true;
+      if (d2 > 1e-6) {
+        const d = Math.sqrt(d2);
+        const push = (radius - d) / d;
+        pos.x += dx * push;
+        pos.z += dz * push;
+      } else {
+        // 圆心已在盒内：沿最小穿透轴推出
+        const toMinX = pos.x - box.min.x;
+        const toMaxX = box.max.x - pos.x;
+        const toMinZ = pos.z - box.min.z;
+        const toMaxZ = box.max.z - pos.z;
+        const minPen = Math.min(toMinX, toMaxX, toMinZ, toMaxZ);
+        if (minPen === toMinX) pos.x = box.min.x - radius;
+        else if (minPen === toMaxX) pos.x = box.max.x + radius;
+        else if (minPen === toMinZ) pos.z = box.min.z - radius;
+        else pos.z = box.max.z + radius;
+      }
+    }
+    return hit;
+  };
+  /** 找到离给定点最近的掩体碰撞盒（用于把刷新点放到掩体背面外侧） */
+  const nearestCollider = (x: number, z: number): THREE.Box3 | null => {
+    let best: THREE.Box3 | null = null;
+    let bestD = 4;
+    for (const b of colliders) {
+      const c = b.getCenter(new THREE.Vector3());
+      const d = Math.hypot(c.x - x, c.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = b;
+      }
+    }
+    return best;
+  };
+  /** 把点沿"远离玩家"方向外推，直到离开掩体碰撞盒并留出一个身位半径 */
+  const pushBehindCover = (x: number, z: number, radius: number): THREE.Vector3 => {
+    const box = nearestCollider(x, z);
+    const p = new THREE.Vector3(x, 0, z);
+    if (!box) return p;
+    const away = new THREE.Vector3(x - camera.position.x, 0, z - camera.position.z);
+    if (away.lengthSq() < 1e-4) away.set(0, 0, 1);
+    away.normalize();
+    for (let i = 0; i < 60; i++) {
+      const inside =
+        p.x > box.min.x - radius &&
+        p.x < box.max.x + radius &&
+        p.z > box.min.z - radius &&
+        p.z < box.max.z + radius;
+      if (!inside) break;
+      p.addScaledVector(away, 0.08);
+    }
+    return p;
+  };
+
   /* ---------------- 玩家掩体（可开关） ---------------- */
   const COVER_KEY = 'jg.slice3d.cover';
   const coverState = { on: (localStorage.getItem(COVER_KEY) ?? 'on') !== 'off' };
@@ -491,6 +563,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     coverOnBtn.classList.toggle('btn-primary', coverState.on);
     coverOffBtn.classList.toggle('btn-primary', !coverState.on);
     localStorage.setItem(COVER_KEY, coverState.on ? 'on' : 'off');
+    rebuildColliders(); // 掩体是实体：增删后同步碰撞盒
   };
   applyCoverSetting();
 
@@ -635,13 +708,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     enemyAI.feintPhase = 0;
     enemyAI.aimPose = 0;
     enemyAI.blocked = 0;
-    // 需求①：把刷新点构造在"掩体背向玩家的那一侧"（几何上必定在掩体后）
-    const away = new THREE.Vector3(cover.x - camera.position.x, 0, cover.z - camera.position.z);
-    if (away.lengthSq() < 0.0001) away.set(0, 0, 1);
-    away.normalize();
-    // 偏移限制在掩体投影范围内（0.6m），保证刷新点始终处于掩体后方而不是被推到侧面
-    const spawnX = cover.x + away.x * 0.6;
-    const spawnZ = cover.z + away.z * 0.6;
+    // 需求①：把刷新点放到"掩体背面外侧"（基于真实碰撞盒外推，保证站在掩体后且不穿模）
+    const behind = pushBehindCover(cover.x, cover.z, 0.42);
+    const spawnX = behind.x;
+    const spawnZ = behind.z;
     // 从掩体后拉出：横向一个身位 + 朝玩家方向走出一段
     enemyAI.coverPos.set(spawnX, 0, spawnZ);
     // 拉出方向：永远朝玩家一侧（避免从掩体后往更远处跑）
@@ -700,6 +770,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       blocked: +enemyAI.blocked.toFixed(2),
     }),
     deaths: () => stats.deaths,
+    decals: () => decals.length,
     probe: (x: number, y: number, z: number) => {
       const from = camera.position.clone();
       const target = new THREE.Vector3(x, y, z);
@@ -1077,6 +1148,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     const eye = crouching ? CONFIG.crouchHeight : CONFIG.eyeHeight;
     camera.position.set(playerPos.x, eye + Math.sin(now * 0.002) * 0.006, playerPos.z);
     camera.position.y += (eye - camera.position.y) * Math.min(1, dt * 10);
+    // 实体碰撞：玩家撞不过掩体/墙体（半径 0.38m）
+    if (resolveXZ(playerPos, 0.38)) {
+      playerVel.multiplyScalar(0.35); // 撞墙后减速，避免贴墙抖动
+      camera.position.x = playerPos.x;
+      camera.position.z = playerPos.z;
+    }
 
     // —— 步枪后坐力与摆动 ——
     recoil = Math.max(0, recoil - dt * 6.5);
@@ -1155,6 +1232,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       if (dist > 0.05) {
         dir.normalize();
         g.position.addScaledVector(dir, CONFIG.enemySpeed * 1.5 * enemyAI.speedJitter * dt);
+        resolveXZ(g.position, 0.4); // 敌人也撞不过掩体
         g.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI;
         enemyAI.walkPhase += dt * 9;
         const swing = Math.sin(enemyAI.walkPhase) * 0.5;
@@ -1198,6 +1276,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       if (dist > 0.06) {
         dir.normalize();
         g.position.addScaledVector(dir, CONFIG.enemySpeed * enemyAI.speedJitter * dt);
+        resolveXZ(g.position, 0.4); // 敌人绕行掩体（贴面滑动）
         // 离开掩体开始拉出时起身（除非本波战术要求保持蹲姿）
         if (!enemyAI.crouch) {
           if (g.scale.y < 1) {
