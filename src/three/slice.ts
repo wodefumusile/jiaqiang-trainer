@@ -438,6 +438,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
           <button class="btn-ghost" id="s3-bench">性能自检</button>
           <button class="btn-ghost" id="s3-quit">返回 2D 版</button>
           <div class="s3-bench-out" id="s3-bench-out"></div>
+          <div class="s3-lastlog" id="s3-lastlog"></div>
         </div>
       </div>
       <div class="overlay hidden" id="s3-loading">
@@ -487,6 +488,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const countRow = container.querySelector<HTMLElement>('#s3-count-row');
   const benchBtn = container.querySelector<HTMLButtonElement>('#s3-bench')!;
   const benchOut = container.querySelector<HTMLElement>('#s3-bench-out')!;
+  const lastLogEl = container.querySelector<HTMLElement>('#s3-lastlog')!;
+  // 事件日志：先占位再实现——因为在场景构建阶段（resetEnemy 初始化）就会调用 logEvent，
+  // 若直接用 const/let 在后面声明会触发 TDZ 异常，导致挂载中断（这是踩过的坑）
+  let eventLog: string[] = [];
+  let logEvent: (msg: string) => void = () => {};
 
   /** 本局敌人数量（玩家开局前可选），999 = 不限 */
   let sessionTarget = Number(localStorage.getItem('jg.slice3d.count') ?? '10') || 10;
@@ -544,11 +550,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   /* ---------------- Three.js 初始化 ---------------- */
   // 抗锯齿（MSAA）在弱显卡/软件渲染路径上非常贵：只有高画质才开
   // powerPreference 请求独显（双显卡笔记本默认可能用核显，这是"配置很好却卡"的常见元凶）
- const renderer = new THREE.WebGLRenderer({
-   canvas,
-   antialias: qualityLevel === 'high',
-   powerPreference: 'high-performance',
- });
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: qualityLevel === 'high',
+  });
   // —— 真实渲染器诊断：浏览器到底用的是显卡，还是 CPU 软件光栅化 ——
   // （核显/软件渲染是"配置很好却卡"的头号元凶，HUD 会把它显出来）
   const glCtx = renderer.getContext();
@@ -951,6 +956,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     enemyAI.hp = DAMAGE.maxHp;
     enemyAI.timer = 0.6 + Math.random() * 1.6; // 出现前的随机等待
     enemyAI.coverName = cover.id;
+    logEvent(`敌人刷新：${cover.id}（难度 ${sliceDiff}）`);
     enemyAI.crouch = Math.random() < t.crouch;
     enemyAI.speedJitter = 1 + (Math.random() * 2 - 1) * t.jitter;
     enemyAI.strafeShoot = t.strafeShoot;
@@ -1170,6 +1176,43 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   let lastLoopTick = performance.now();
   let recoveries = Number(localStorage.getItem('jg.slice3d.recoveries') ?? '0') || 0;
   let recovering = false;
+  /**
+   * 事件日志：记录"冻结前最后做了什么"。
+   * 每次关键动作都写进 localStorage，下次打开（尤其是自动恢复重载后）就能看到触发点。
+   */
+  eventLog = (() => {
+    try {
+      const raw = localStorage.getItem('jg.slice3d.eventLog');
+      const arr = raw ? (JSON.parse(raw) as string[]) : [];
+      return Array.isArray(arr) ? arr.slice(-8) : [];
+    } catch {
+      return [];
+    }
+  })();
+  logEvent = (msg: string): void => {
+    eventLog.push(`${new Date().toLocaleTimeString('zh-CN')} ${msg}`);
+    if (eventLog.length > 8) eventLog.shift();
+    try {
+      localStorage.setItem('jg.slice3d.eventLog', JSON.stringify(eventLog));
+    } catch {
+      // 忽略存储异常
+    }
+  };
+  // 上次是否是"自动恢复"重载？把触发点显示出来
+  try {
+    const lastRec = localStorage.getItem('jg.slice3d.lastRecovery');
+    if (lastRec) {
+      lastLogEl.innerHTML =
+        `<b>上次运行疑似冻结</b>：${lastRec}<br>` +
+        `恢复次数：${recoveries}<br>` +
+        `冻结前最后动作：<br>${eventLog.map((l) => `· ${l}`).join('<br>') || '（无记录）'}`;
+      localStorage.removeItem('jg.slice3d.lastRecovery');
+    } else {
+      lastLogEl.textContent = '';
+    }
+  } catch {
+    // 忽略
+  }
 
   const stats = { shots: 0, hits: 0, kills: 0, deaths: 0, startedEpoch: Date.now(), startedPerf: performance.now() };
   // 本局统计（用于结算成绩）
@@ -1304,6 +1347,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         if (enemyAI.hp <= 0) {
           enemyAI.state = 'dead';
           stats.kills++;
+          logEvent(`击杀 #${stats.kills}`);
           if (zone === 'head') headshotCount++;
           if (currentEncounter?.appearAt) reactionSamples.push(now - currentEncounter.appearAt);
           killsEl.textContent = String(stats.kills);
@@ -1482,6 +1526,14 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     recoveries++;
     localStorage.setItem('jg.slice3d.recoveries', String(recoveries));
     try {
+      localStorage.setItem(
+        'jg.slice3d.lastRecovery',
+        `${reason} · ${new Date().toLocaleString('zh-CN')}`,
+      );
+    } catch {
+      // 忽略
+    }
+    try {
       showBanner(`${reason}，正在自动恢复…`);
     } catch {
       // 极端情况下 DOM 不可用也无妨，重载即可
@@ -1518,6 +1570,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   /** 应用画质档位（改像素比/阴影/灯光强度，并立即重算画布尺寸） */
   const applyQuality = (level: QualityLevel): void => {
     qualityLevel = level;
+    logEvent(`画质 → ${level}`);
     localStorage.setItem('jg.slice3d.quality', level);
     doorLight.intensity = level === 'low' ? 3 : 6;
     // 运行时只改"渲染分辨率"——阴影/材质档位需要刷新页面才生效（避免着色器重编译卡顿）
@@ -1984,6 +2037,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         // 开火：扣血 + 红屏 + 阵亡计数
         // 注意：这里**不能** resetEnemy()——那会把敌人血量一起回满（曾经的"无敌帧"Bug）
         stats.deaths++;
+        logEvent(`玩家阵亡 #${stats.deaths}`);
         hpEl.textContent = '0';
         sfx.enemyShot();
         document.body.classList.add('s3-hurt');
