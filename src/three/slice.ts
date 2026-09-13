@@ -1048,6 +1048,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       longFrames,
       maxFrameMs: +maxFrameMs.toFixed(1),
       loopError,
+      recoveries,
       gpu: gpuName,
       gpuSoftware: gpuIsSoftware,
       antialias: qualityLevel === 'high',
@@ -1055,6 +1056,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     resetMaxFrame: () => {
       maxFrameMs = 0;
       longFrames = 0;
+    },
+    /** 测试钩子：模拟"循环冻结"，用于验证看门狗能自动恢复 */
+    forceStall: () => {
+      lastLoopTick = performance.now() - 9999;
     },
     setQuality: (q: 'high' | 'medium' | 'low') => {
       autoQuality = false;
@@ -1161,6 +1166,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   /** 性能自检模式：收集每帧耗时（毫秒） */
   let benchMode = false;
   let benchSamples: number[] = [];
+  /** 看门狗：记录最后一次真实渲染的时刻（用于检测"冻结"并自动恢复） */
+  let lastLoopTick = performance.now();
+  let recoveries = Number(localStorage.getItem('jg.slice3d.recoveries') ?? '0') || 0;
+  let recovering = false;
 
   const stats = { shots: 0, hits: 0, kills: 0, deaths: 0, startedEpoch: Date.now(), startedPerf: performance.now() };
   // 本局统计（用于结算成绩）
@@ -1457,10 +1466,38 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   canvas.addEventListener('webglcontextlost', (e) => {
     e.preventDefault();
     loopError = 'WebGL 上下文丢失（显存或驱动问题）';
+    recover('图形上下文丢失');
   });
   canvas.addEventListener('webglcontextrestored', () => {
     loopError = '';
   });
+
+  /**
+   * 自动恢复：显卡驱动挂起 / 上下文丢失 / 循环停摆时，浏览器会彻底冻住且无法自救。
+   * 这里统一走"提示 + 自动重载"，把"永久卡死"变成"最多两秒恢复"。
+   */
+  const recover = (reason: string): void => {
+    if (recovering) return;
+    recovering = true;
+    recoveries++;
+    localStorage.setItem('jg.slice3d.recoveries', String(recoveries));
+    try {
+      showBanner(`${reason}，正在自动恢复…`);
+    } catch {
+      // 极端情况下 DOM 不可用也无妨，重载即可
+    }
+    window.setTimeout(() => window.location.reload(), 900);
+  };
+
+  /**
+   * 看门狗：每 1 秒检查一次"最后一帧"距今多久。
+   * 超过 2.5 秒没有任何一帧 → 判定冻结并自动恢复（这是"卡住就无法恢复"的根治手段）。
+   */
+  const watchdog = window.setInterval(() => {
+    if (recovering || !running) return;
+    if (performance.now() - lastLoopTick > 2500) recover('检测到画面冻结');
+  }, 1000);
+  void watchdog;
   // 容器尺寸变化也同步（例如进入全屏、布局变化）
   const ro = new ResizeObserver(() => resize());
   ro.observe(container);
@@ -1714,8 +1751,17 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     const now = performance.now();
     const dt = Math.min(0.05, (now - lastT) / 1000);
     lastT = now;
+    lastLoopTick = now; // 看门狗心跳
+    // 单帧超过 1.2 秒：视为"危险帧"（可能是驱动挂起前兆），立刻降到最低画质并记录
+    if (dt >= 0.9) {
+      longFrames++;
+      if (qualityLevel !== 'low') {
+        applyQuality('low');
+      }
+    }
     // 卡顿统计：单帧超过 400ms 记为一次长卡（用于判断是"持续低帧"还是"周期性卡死"）
     if (dt > 0.4) longFrames++;
+    // 注意：上面已按 0.9s 阈值做"危险帧降档"，这里保留 0.4s 的统计口径
     if (dt * 1000 > maxFrameMs) maxFrameMs = dt * 1000;
     if (benchMode) benchSamples.push(dt * 1000);
     if (!running) return;
