@@ -31,7 +31,7 @@ import {
 import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-1.0';
+const BUILD_STAMP = 'v3d-1.1';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -91,6 +91,12 @@ interface SceneDef {
   fog: { near: number; far: number };
   lamps: { x: number; y: number; z: number }[];
   colors: { floor: number; wall: number; ceil: number; prop: number };
+  /**
+   * 每局随机追加的掩体（=额外刷新点）——防"玩家记完固定点位就腻"。
+   * minDist/maxDist：相对玩家的距离带；keepDoor：门洞正面留出的通道宽度；
+   * minGap：与已有掩体的最小间距。缺省表示这个场景不做随机追加。
+   */
+  proc?: { count: number; minDist: number; maxDist: number; keepDoor: number; minGap: number };
 }
 
 const SCENES: SceneDef[] = [
@@ -103,19 +109,23 @@ const SCENES: SceneDef[] = [
     door: { w: 1.4, h: 2.3, z: -6 },
     player: { x: 0, z: 2.6, limitX: 4.2, limitZmin: -3.2, limitZmax: 2.9 },
     playerCover: { x: 0.6, z: 0.9, w: 3.2, h: 1.3, d: 0.5 },
-    spawns: [
-      { id: '前左箱后', x: -3.8, z: -2.2, tier: 0 },
-      { id: '前右箱后', x: 3.8, z: -1.8, tier: 0 },
-      { id: '门后左', x: -1.8, z: -7.6, tier: 1 },
-      { id: '门后右', x: 1.8, z: -7.6, tier: 1 },
-    ],
-    props: [
-      { x: -1.9, z: -3.4, w: 1.2, h: 1.1, d: 1.2, kind: 'crate' },
-      { x: 2.2, z: -2.4, w: 3.2, h: 0.95, d: 0.4, kind: 'barrier' },
-      { x: -3.8, z: -2.2, w: 1.9, h: 1.95, d: 1.5, kind: 'crate' },
-      { x: 3.8, z: -1.8, w: 1.9, h: 1.95, d: 1.5, kind: 'crate' },
-      { x: -5.4, z: -1.2, w: 2.0, h: 0.7, d: 1.0, kind: 'sandbag' },
-    ],
+  spawns: [
+    { id: '前左箱后', x: -3.8, z: -2.2, tier: 0 },
+    { id: '前右箱后', x: 3.8, z: -1.8, tier: 0 },
+    { id: '门后左', x: -1.8, z: -7.6, tier: 1 },
+    { id: '门后右', x: 1.8, z: -7.6, tier: 1 },
+    { id: '左中矮墙后', x: -5.4, z: -4.4, tier: 1 },
+    { id: '右中矮墙后', x: 5.2, z: -4.0, tier: 1 },
+  ],
+  props: [
+    { x: -1.9, z: -3.4, w: 1.2, h: 1.1, d: 1.2, kind: 'crate' },
+    { x: 2.2, z: -2.4, w: 3.2, h: 0.95, d: 0.4, kind: 'barrier' },
+    { x: -3.8, z: -2.2, w: 1.9, h: 1.95, d: 1.5, kind: 'crate' },
+    { x: 3.8, z: -1.8, w: 1.9, h: 1.95, d: 1.5, kind: 'crate' },
+    { x: -5.4, z: -4.4, w: 1.7, h: 1.95, d: 1.4, kind: 'barrier' },
+    { x: 5.2, z: -4.0, w: 1.7, h: 1.95, d: 1.4, kind: 'crate' },
+    { x: -5.4, z: -1.2, w: 2.0, h: 0.7, d: 1.0, kind: 'sandbag' },
+  ],
     fog: { near: 8, far: 34 },
     lamps: [{ x: 6.1, y: 2.5, z: -1.5 }],
     colors: { floor: 0x3b3730, wall: 0x9d8f79, ceil: 0x2a1e15, prop: 0x6b4a2c },
@@ -138,6 +148,10 @@ const SCENES: SceneDef[] = [
       { id: '远箱右', x: 6.5, z: -25, tier: 2 },
       { id: '门后左', x: -2.4, z: -35.4, tier: 3 },
       { id: '门后右', x: 2.4, z: -35.4, tier: 3 },
+      { id: '近中矮墙后', x: -2.6, z: -10.5, tier: 0 },
+      { id: '中箱左二', x: -4.6, z: -18.5, tier: 1 },
+      { id: '远中箱后', x: 1.8, z: -27, tier: 2 },
+      { id: '远侧墙后', x: -10.5, z: -28, tier: 2 },
     ],
     props: [
       // 近段：大木箱（14~16m）
@@ -155,11 +169,18 @@ const SCENES: SceneDef[] = [
       // 门洞两侧（远端）
       { x: -4.4, z: -32.6, w: 2.0, h: 1.8, d: 1.5, kind: 'crate' },
       { x: 4.4, z: -32.6, w: 2.0, h: 1.8, d: 1.5, kind: 'crate' },
+      // 额外的固定掩体（配合上面新增的刷新点）
+      { x: -2.6, z: -10.5, w: 3.0, h: 1.9, d: 0.5, kind: 'barrier' },
+      { x: -4.6, z: -18.5, w: 1.9, h: 1.95, d: 1.5, kind: 'crate' },
+      { x: 1.8, z: -27, w: 2.0, h: 1.9, d: 1.6, kind: 'crate' },
+      { x: -10.5, z: -28, w: 2.2, h: 2.0, d: 1.6, kind: 'crate' },
       // 玩家侧沙袋装饰
       { x: -6.2, z: 3.4, w: 2.2, h: 0.75, d: 1.0, kind: 'sandbag' },
       { x: 6.2, z: 3.4, w: 2.2, h: 0.75, d: 1.0, kind: 'sandbag' },
     ],
     fog: { near: 30, far: 130 },
+    // 每局随机追加 5 个掩体位置：固定点位背下来之后，随机点位继续制造"没见过"的角度
+    proc: { count: 5, minDist: 13, maxDist: 31, keepDoor: 4.5, minGap: 3.2 },
     lamps: [
       { x: 11.6, y: 3.5, z: -4 },
       { x: -11.6, y: 3.5, z: -16 },
@@ -173,17 +194,24 @@ const DEFAULT_SCENE_ID = 'room3d';
 const sceneById = (id: string | null): SceneDef => SCENES.find((s) => s.id === id) ?? SCENES[0];
 
 /**
- * 难度 → 允许出现的最远刷新档位。
- * 低难度只在近掩体拉出（先把近距离练稳），高难度才会用到 30m+ 的远掩体和远端门洞。
+ * 难度 → 各距离档位的**权重**（不是开关）。
+ *
+ * 【重要修正】原来这里是"低难度只允许近点"，结果简单档只剩 2 个刷新点，
+ * 玩家打两局就腻。现在的规则是：**所有刷新点都可能出现**，难度只调整概率分布——
+ * 简单偏向近点（先练稳），极限偏向远点（练长距离预瞄），但永远存在"这次从哪出来"的悬念。
  */
-const TIER_BY_DIFF: Record<string, number> = {
-  easy: 0,
-  normal: 1,
-  hard: 2,
-  insane: 3,
-  master: 3,
-  extreme: 3,
+const TIER_WEIGHT_BY_DIFF: Record<string, [number, number, number, number]> = {
+  easy: [6, 3, 1, 0.5],
+  normal: [4, 4, 2, 1],
+  hard: [3, 4, 3, 1.5],
+  insane: [2, 3, 4, 2.5],
+  master: [1.5, 2.5, 4, 3.5],
+  extreme: [1, 2, 4, 5],
 };
+
+/** 当前难度下某个距离档位的抽样权重 */
+const tierWeight = (diff: string, tier: number): number =>
+  (TIER_WEIGHT_BY_DIFF[diff] ?? TIER_WEIGHT_BY_DIFF.normal)[tier] ?? 1;
 
 /**
  * 材质工厂：弱显卡上 MeshStandardMaterial（PBR）太贵，
@@ -1115,6 +1143,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const rebuildColliders = (): void => {
     colliders = room.walls.map((m) => new THREE.Box3().setFromObject(m));
   };
+  /**
+   * 实际可用的敌人刷新点 = 场景固定点 + 每局随机追加点。
+   * 随机点在 buildRoom 之后生成（见 addProceduralCovers），所以这里只放固定点。
+   */
+  const spawnPoints: SceneSpawn[] = [...SCENE.spawns];
   /** 把圆柱体（半径 radius）推出所有碰撞盒；返回累计推出向量（供"沿面滑动"使用） */
   const resolveXZ = (pos: THREE.Vector3, radius: number): THREE.Vector3 => {
     const pushAccum = new THREE.Vector3();
@@ -1360,23 +1393,96 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const pickSpawnPoint = (): { x: number; z: number; id: string; fallback: boolean } => {
     const px = camera.position.x;
     const pz = camera.position.z;
-    const maxTier = TIER_BY_DIFF[sliceDiff] ?? 1;
-    const valid = SCENE.spawns.filter((c) => {
+    const valid = spawnPoints.filter((c) => {
       // 硬性规则：只在玩家**正面**刷新（至少 1.5m 在前方），杜绝"从背后冒出来"
       if (c.z > pz - 1.5) return false;
-      // 难度越高，允许的刷新距离越远
-      if (c.tier > maxTier) return false;
       if (Math.hypot(c.x - px, c.z - pz) < CONFIG.spawn.minDistance) return false;
       return !isVisibleFromPlayer(new THREE.Vector3(c.x, 0, c.z));
     });
     // 兜底：若没有任何点通过严格遮挡测试，就固定用"背墙后的门后点"——
     // 墙是通高的，任何站姿/蹲姿都挡得住，绝不会刷在玩家眼前
-    const behindWall = SCENE.spawns.filter((c) => c.z <= SCENE.door.z);
+    const behindWall = spawnPoints.filter((c) => c.z <= SCENE.door.z);
     // 三级兜底，任何情况下都不能让 pool 为空（会直接崩在 pick.x 上）
-    const pool = valid.length > 0 ? valid : behindWall.length > 0 ? behindWall : SCENE.spawns;
-    const pick = pool[Math.floor(Math.random() * pool.length)];
+    const pool = valid.length > 0 ? valid : behindWall.length > 0 ? behindWall : spawnPoints;
+    // 难度决定"远近概率分布"，不决定"有哪些点"——所有点都有机会出现
+    const weights = pool.map((c) => tierWeight(sliceDiff, c.tier));
+    const total = weights.reduce((a, b) => a + b, 0);
+    let r = Math.random() * total;
+    let pick = pool[pool.length - 1];
+    for (let i = 0; i < pool.length; i++) {
+      r -= weights[i];
+      if (r <= 0) {
+        pick = pool[i];
+        break;
+      }
+    }
     return { ...pick, fallback: valid.length === 0 };
   };
+
+  /**
+   * 每局随机追加掩体（=额外刷新点）。
+   *
+   * 为什么要做：固定刷新点背下来之后，玩家只剩"我记住那两个角度"的机械反应，
+   * 练不出"随时处理新角度"的能力，也容易腻。每次进入随机撒几个新掩体，
+   * 位置仍然受严格约束，保证不会出现"敌人卡死/凭空出现/挡死枪线"：
+   *   · 在走廊宽度内、离侧墙 ≥3.6m（敌人要能横拉出身位）
+   *   · 离已有掩体 ≥minGap（互相挡枪线会卡住 AI）
+   *   · 不堵门洞正面通道
+   *   · 站在掩体后必须被完全遮挡（复用 isVisibleFromPlayer 做射线验证，不合格就撤掉）
+   *   · 掩体高度 ≥1.9m（站立敌人也能完全藏住）
+   */
+  const addProceduralCovers = (): number => {
+    const proc = SCENE.proc;
+    if (!proc || proc.count <= 0) return 0;
+    const halfW = SCENE.room.w / 2;
+    const zNear = SCENE.player.z - proc.minDist;
+    const zFar = SCENE.player.z - proc.maxDist;
+    if (zNear <= zFar) return 0;
+    const procMat = makeMat({ color: SCENE.colors.prop, roughness: 0.86 });
+    const placed = SCENE.props.map((p) => ({ x: p.x, z: p.z }));
+    let added = 0;
+    for (let attempt = 0; attempt < proc.count * 40 && added < proc.count; attempt++) {
+      const z = zFar + Math.random() * (zNear - zFar);
+      const xLimit = halfW - 3.6;
+      const x = -xLimit + Math.random() * xLimit * 2;
+      if (Math.abs(x) < proc.keepDoor && z < SCENE.door.z + 14) continue; // 门洞通道
+      if (placed.some((p) => Math.hypot(p.x - x, p.z - z) < proc.minGap)) continue;
+
+      const w = 1.8 + Math.random() * 0.7;
+      const h = 1.9 + Math.random() * 0.25;
+      const d = 1.3 + Math.random() * 0.5;
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), procMat);
+      m.position.set(x, h / 2, z);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      m.userData.isCover = true;
+      room.root.add(m);
+      room.walls.push(m);
+      rebuildColliders();
+      // 射线验证：这块掩体必须真的挡住玩家视线，否则说明它挡不住人，撤掉
+      if (isVisibleFromPlayer(new THREE.Vector3(x, 0, z))) {
+        room.root.remove(m);
+        const idx = room.walls.indexOf(m);
+        if (idx >= 0) room.walls.splice(idx, 1);
+        rebuildColliders();
+        continue;
+      }
+      const dist = Math.hypot(x - SCENE.player.x, z - SCENE.player.z);
+      const tier: 0 | 1 | 2 | 3 = dist < 18 ? 0 : dist < 25 ? 1 : dist < 32 ? 2 : 3;
+      spawnPoints.push({ id: `随机位${added + 1}`, x, z, tier });
+      placed.push({ x, z });
+      added++;
+    }
+    return added;
+  };
+  const procAdded = addProceduralCovers();
+  // 场景卡上补"刷新点数量"（随机追加是每局变的，只能生成后写进去）
+  const activeSceneEm = container.querySelector<HTMLElement>(
+    `#s3-scene-row [data-scene="${SCENE.id}"] .s3-scene-txt em`,
+  );
+  if (activeSceneEm) {
+    activeSceneEm.innerHTML = `${SCENE.desc}<br>${SCENE.range}　·　刷新点 ${SCENE.spawns.length} 固定${procAdded > 0 ? ` + ${procAdded} 随机` : ''}`;
+  }
 
   // 第一人称步枪：挂到相机上（-Z 为枪口方向），做右下角偏移
   const rifle = buildRifle();
@@ -1632,7 +1738,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       id: SCENE.id,
       name: SCENE.name,
       room: { ...SCENE.room },
-      spawns: SCENE.spawns.length,
+      spawns: spawnPoints.length,
+      fixedSpawns: SCENE.spawns.length,
+      procSpawns: procAdded,
+      spawnIds: spawnPoints.map((s) => s.id),
+      spawnCoords: spawnPoints.map((s) => [+s.x.toFixed(1), +s.z.toFixed(1)]),
       walls: room.walls.length,
       fog: [SCENE.fog.near, SCENE.fog.far],
       limits: { x: SCENE.player.limitX, zmin: SCENE.player.limitZmin, zmax: SCENE.player.limitZmax },

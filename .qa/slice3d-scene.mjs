@@ -45,7 +45,7 @@ const switchScene = async (id) => {
 
 const collectSpawns = async (seconds) => {
   const entered = await ensureRunning(page);
-  const out = { entered, distances: [], hidden: [], aiming: 0, stalls: 0 };
+  const out = { entered, distances: [], hidden: [], covers: new Set(), aiming: 0, stalls: 0, envReloads: 0 };
   let lastSeq = -1;
   let lastRenders = await renders(page);
   let lastAdvance = Date.now();
@@ -56,7 +56,15 @@ const collectSpawns = async (seconds) => {
     await page.waitForTimeout(120);
     const now = Date.now();
     const r = await renders(page);
-    if (r >= 0 && r > lastRenders) {
+    // 环境重载（软件渲染偶发丢上下文）→ 页面回到开始界面，数据作废、重新进入
+    if (r < 0 || now - lastAdvance > 3000) {
+      out.envReloads++;
+      await ensureRunning(page, 12);
+      lastRenders = await renders(page);
+      lastAdvance = Date.now();
+      continue;
+    }
+    if (r > lastRenders) {
       lastRenders = r;
       lastAdvance = now;
     } else if (now - lastAdvance > 400) {
@@ -68,6 +76,7 @@ const collectSpawns = async (seconds) => {
       lastSeq = s.spawn.seq;
       out.distances.push(s.spawn.distance);
       out.hidden.push(s.spawn.visible === false);
+      out.covers.add(s.spawn.cover);
     }
     if (s.state === 'aiming') {
       if (aimSince === null) aimSince = now;
@@ -113,7 +122,7 @@ console.log(
 );
 console.log('全部在视线外刷新', extremeRun.hidden.every(Boolean) ? '✅' : `❌ ${JSON.stringify(extremeRun.hidden)}`);
 console.log('成功架枪次数', extremeRun.aiming, extremeRun.aiming > 0 ? '✅ 能拉出并就位' : '❌');
-console.log('出图定格次数', extremeRun.stalls);
+console.log('出现过的掩体数', extremeRun.covers.size, '· 出图定格', extremeRun.stalls, '· 环境重载', extremeRun.envReloads);
 
 // 4) 简单难度：只应该用近掩体
 await page.evaluate(() => localStorage.setItem('jg.slice3d.diff', 'easy'));
@@ -121,9 +130,15 @@ await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('#s3-start');
 const easyRun = await collectSpawns(30);
 console.log('简单难度刷新距离', JSON.stringify(easyRun.distances));
+const median = (arr) => {
+  const s = [...arr].sort((a, b) => a - b);
+  return s.length ? s[Math.floor(s.length / 2)] : 0;
+};
 console.log(
-  '低难度只用近掩体',
-  easyRun.distances.length > 0 && Math.max(...easyRun.distances) < 22 ? '✅' : '❌',
+  '难度只调远近概率（不再砍掉刷新点）',
+  easyRun.covers.size >= 5 && median(easyRun.distances) < median(extremeRun.distances)
+    ? `✅ 简单档中位 ${median(easyRun.distances).toFixed(1)}m / 极限档中位 ${median(extremeRun.distances).toFixed(1)}m，简单档也用到 ${easyRun.covers.size} 个不同掩体`
+    : `❌ 简单档 ${easyRun.covers.size} 个掩体，中位 ${median(easyRun.distances).toFixed(1)}m`,
 );
 
 console.log('UNHANDLED_REJECTIONS', JSON.stringify(await safe(page, () => window.__rejections ?? [])));
