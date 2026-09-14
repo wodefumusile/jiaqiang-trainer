@@ -31,7 +31,7 @@ import {
 import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-1.2';
+const BUILD_STAMP = 'v3d-1.3';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -637,7 +637,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         <div class="s3-line">版本 ${BUILD_STAMP}</div>
         <div class="s3-line">鼠标转视角 · WASD 移动 · Ctrl 下蹲</div>
         <div class="s3-line">按住左键连发 · R 换弹 · Esc 退出</div>
-        <div class="s3-line">F 全屏 · C 掩体 · F1-F3 画质</div>
+        <div class="s3-line">F 全屏切换 · C 掩体 · P 画质</div>
         <div class="s3-line s3-perf" id="s3-perf">--</div>
       </div>
       <div class="s3-hud s3-right">
@@ -677,11 +677,20 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
                 ).join('')}
               </div>
               <p class="s3-hint">切换场景会自动重载一次（房间要按新尺寸重建）。</p>
-              <div class="s3-field">
-                <label>玩家掩体</label>
-                <div class="s3-pills">
-                  <button class="s3-pill" id="s3-cover-on" type="button">有掩体</button>
-                  <button class="s3-pill" id="s3-cover-off" type="button">空旷场地</button>
+              <div class="s3-field-row">
+                <div class="s3-field">
+                  <label>玩家掩体</label>
+                  <div class="s3-pills">
+                    <button class="s3-pill" id="s3-cover-on" type="button">有掩体</button>
+                    <button class="s3-pill" id="s3-cover-off" type="button">空旷场地</button>
+                  </div>
+                </div>
+                <div class="s3-field">
+                  <label>战斗画面</label>
+                  <div class="s3-pills" id="s3-fs-row">
+                    <button class="s3-pill" data-fs="auto" type="button">自动全屏</button>
+                    <button class="s3-pill" data-fs="window" type="button">窗口内</button>
+                  </div>
                 </div>
               </div>
             </section>
@@ -1095,6 +1104,35 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   });
   refreshSensUI();
   refreshChUI();
+
+  /* ---------------- 战斗画面：窗口内 / 进入战斗自动全屏 ---------------- */
+  const FS_KEY = 'jg.slice3d.autofullscreen';
+  /** 默认开启：进战斗就占满整个屏幕（演练时的视野越大越接近真实对枪） */
+  let autoFullscreen = true;
+  try {
+    autoFullscreen = localStorage.getItem(FS_KEY) !== 'window';
+  } catch {
+    autoFullscreen = true;
+  }
+  const fsRow = container.querySelector<HTMLElement>('#s3-fs-row')!;
+  const refreshFsUI = (): void => {
+    fsRow
+      .querySelectorAll<HTMLButtonElement>('[data-fs]')
+      .forEach((b) => b.classList.toggle('is-on', (b.dataset.fs === 'auto') === autoFullscreen));
+  };
+  fsRow.querySelectorAll<HTMLButtonElement>('[data-fs]').forEach((b) => {
+    b.addEventListener('click', () => {
+      autoFullscreen = b.dataset.fs === 'auto';
+      try {
+        localStorage.setItem(FS_KEY, autoFullscreen ? 'auto' : 'window');
+      } catch {
+        // 存不进去也只影响下次进入，本次照常生效
+      }
+      refreshFsUI();
+      showBanner(autoFullscreen ? '战斗画面：进入时自动全屏' : '战斗画面：只在窗口内');
+    });
+  });
+  refreshFsUI();
 
   /* ---------------- Three.js 初始化 ---------------- */
   // 抗锯齿（MSAA）在弱显卡/软件渲染路径上非常贵：只有高画质才开
@@ -2304,20 +2342,52 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     camera.updateProjectionMatrix();
   };
   const fsRoot = container.querySelector<HTMLElement>('.slice3d') ?? container;
-  /** 网页内全屏：对整个 3D 容器调用全屏 API（不依赖浏览器菜单） */
-  const toggleFullscreen = async (): Promise<void> => {
+  /** 最近一次成功进入全屏的时刻（用于识别"是不是全屏把图形上下文搞挂了"） */
+  let fullscreenAt = 0;
+  /**
+   * 请求"网页内全屏"。
+   * 注意：全屏 API 必须在**用户手势**里同步调用，否则会被浏览器拒绝——
+   * 所以「点击进入」那一下就要顺手申请（见 start()），不能等 await 之后再申请。
+   */
+  const requestFullscreen = async (): Promise<boolean> => {
+    if (document.fullscreenElement === fsRoot) return true;
     try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      } else {
-        await fsRoot.requestFullscreen();
-      }
+      await fsRoot.requestFullscreen();
+      fullscreenAt = performance.now();
+      return true;
     } catch {
-      showBanner('当前环境不支持全屏');
+      return false;
     }
   };
+  /** 网页内全屏切换（F 键 / 菜单按钮用） */
+  const toggleFullscreen = async (): Promise<void> => {
+    if (document.fullscreenElement) {
+      try {
+        await document.exitFullscreen();
+        showBanner('已退出全屏');
+      } catch {
+        showBanner('退出全屏失败');
+      }
+      return;
+    }
+    const ok = await requestFullscreen();
+    showBanner(ok ? '已进入全屏（Esc 退出）' : '当前环境不允许全屏，请用浏览器菜单的 F11');
+  };
+  /**
+   * 全屏切换的瞬间容器尺寸还没稳定，只靠 fullscreenchange 调一次 resize 可能算错，
+   * 所以过渡结束后再补两次（无副作用，代价可以忽略）。
+   */
+  const resizeSoon = (): void => {
+    resize();
+    window.setTimeout(resize, 120);
+    window.setTimeout(resize, 420);
+  };
+  const onFullscreenChange = (): void => {
+    resizeSoon();
+    if (document.fullscreenElement === fsRoot) lockAcquiredAt = performance.now();
+  };
+  document.addEventListener('fullscreenchange', onFullscreenChange);
   window.addEventListener('resize', resize);
-  document.addEventListener('fullscreenchange', resize);
   // WebGL 上下文丢失（显存/驱动问题会让画面彻底停住）：捕获并提示
   canvas.addEventListener('webglcontextlost', (e) => {
     e.preventDefault();
@@ -2337,6 +2407,20 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     recovering = true;
     recoveries++;
     localStorage.setItem('jg.slice3d.recoveries', String(recoveries));
+    /**
+     * 自保护：如果故障发生在"刚进全屏"的 3 秒内，说明这台机器的全屏切换会把
+     * 图形上下文搞挂（重载后再自动进全屏 = 无限循环，玩家会以为游戏坏了）。
+     * 这时自动关掉"进入战斗全屏"，让玩家至少能正常玩。
+     */
+    if (autoFullscreen && fullscreenAt > 0 && performance.now() - fullscreenAt < 3000) {
+      autoFullscreen = false;
+      try {
+        localStorage.setItem(FS_KEY, 'window');
+      } catch {
+        // 存储不可用也无妨，本次会话已经不会再自动全屏
+      }
+      refreshFsUI();
+    }
     try {
       localStorage.setItem(
         'jg.slice3d.lastRecovery',
@@ -2517,6 +2601,13 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const start = (): void => {
     overlay.classList.add('hidden');
     tryLock();
+    // 战斗画面全屏：必须在这一下用户手势里同步申请（放到 await 之后就会被浏览器拒绝）。
+    // 失败也不影响开打，玩家可以随时按 F 或点菜单里的全屏按钮重试。
+    if (autoFullscreen && !document.fullscreenElement) {
+      void requestFullscreen().then((ok) => {
+        if (!ok) logEvent('自动全屏被浏览器拒绝');
+      });
+    }
     // 关键修复：指针锁定必须在"用户手势"内**同步**申请。
     // 之前放在 await 加载之后申请，已超出浏览器的手势有效期 → 被拒绝 →
     // 鼠标无响应、视角冻住，表现就是"卡住动不了"（重载后偶发成功，所以时好时坏）
@@ -2548,6 +2639,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     firing = false;
     cancelAnimationFrame(rafId);
     if (document.pointerLockElement === canvas) void document.exitPointerLock();
+    // 退出战斗就退出全屏（否则重载后会卡在全屏里，玩家以为浏览器坏了）
+    if (document.fullscreenElement) void document.exitFullscreen();
     if (stats.shots > 0) {
       const summary = summarizeSession({
         modeId: 'positioning',
@@ -3149,7 +3242,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     cancelAnimationFrame(rafId);
     running = false;
     ro.disconnect();
-    document.removeEventListener('fullscreenchange', resize);
+    document.removeEventListener('fullscreenchange', onFullscreenChange);
     document.removeEventListener('keydown', onKeyDown);
     document.removeEventListener('keyup', onKeyUp);
     document.removeEventListener('mousemove', onMouseMove);

@@ -499,6 +499,17 @@ body.s3-hurt::after {
   justify-content: space-between;
 }
 
+/* 两个并排的小设置（省一半高度，720p 下少滚动一截） */
+.s3-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.s3-field-row .s3-field {
+  margin-bottom: 10px;
+}
+
 .s3-num {
   color: var(--accent);
   font-variant-numeric: tabular-nums;
