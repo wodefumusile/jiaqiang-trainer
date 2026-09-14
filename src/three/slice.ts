@@ -31,7 +31,7 @@ import {
 import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-0.9.1';
+const BUILD_STAMP = 'v3d-1.0';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -39,38 +39,150 @@ const CONFIG = {
   eyeHeight: 1.62,
   /** 下蹲眼高（米） */
   crouchHeight: 1.05,
-  /** 走廊宽度、长度 */
-  roomWidth: 14,
-  roomDepth: 26,
-  roomHeight: 3.2,
-  /** 门洞尺寸与位置 */
-  doorWidth: 1.4,
-  doorHeight: 2.3,
-  doorZ: -6,
-  /** 掩体（木箱）位置 */
-  crate: { x: -1.9, z: -3.4, w: 1.2, h: 1.1, d: 1.2 },
-  /** 玩家侧掩体（半高墙，蹲下可完全躲住） */
-  playerCover: { x: 0.6, z: 0.9, w: 3.2, h: 1.3, d: 0.5 },
-  /** 玩家可移动范围 */
-  moveLimitX: 4.2,
-  moveLimitZ: 3.2,
   /** 移动速度与灵敏度换算（复用 2D 版的 px/计数 → 3D 角度） */
   moveSpeed: 3.4,
-  /** 敌人拉出身位（米） */
-  peekOffsets: [0.5, 1.0, 1.6, 2.4],
-  /** 刷新点：**只在玩家正面方向**（门口 + 前侧掩体），不再有身后/侧后刷新 */
-  covers: [
-    { id: '门后左', x: -1.8, z: -7.6 },
-    { id: '门后右', x: 1.8, z: -7.6 },
-    { id: '前左箱后', x: -3.8, z: -2.2 },
-    { id: '前右箱后', x: 3.8, z: -1.8 },
-  ],
   /** 敌人停下后的开火前摇（秒） */
   enemyAimTime: [0.55, 0.95],
   /** 敌人移动速度（米/秒） */
   enemySpeed: 1.9,
   /** 刷新约束：离玩家最小距离（米）与判定用眼高 */
   spawn: { minDistance: 4, headHeight: 1.6 },
+};
+
+/* ===================== 场景表（主页"场景"单元的数据源） =====================
+ * 一张场景 = 房间尺寸 + 门洞 + 玩家出生点/活动范围 + 掩体（=敌人刷新点）
+ *            + 可见道具 + 雾 + 灯位 + 配色。
+ * 所有几何体都在 buildRoom() 里按这张表生成，不再写死——加场景只需要往 SCENES 里加一条。
+ */
+
+/** 可见道具：kind=sandbag 只做装饰（不挡子弹），其余都是实体掩体（挡人挡弹） */
+interface SceneProp {
+  x: number;
+  z: number;
+  w: number;
+  h: number;
+  d: number;
+  kind: 'crate' | 'barrier' | 'sandbag';
+}
+
+/** 敌人刷新点：tier 0 最近、3 最远；低难度只用近处，保证循序渐进 */
+interface SceneSpawn {
+  id: string;
+  x: number;
+  z: number;
+  tier: 0 | 1 | 2 | 3;
+}
+
+interface SceneDef {
+  id: string;
+  name: string;
+  desc: string;
+  /** 交战距离文案（主页场景卡上显示） */
+  range: string;
+  room: { w: number; d: number; h: number };
+  /** 后墙上的门洞：敌人从这里拉出 */
+  door: { w: number; h: number; z: number };
+  /** 玩家出生点与可移动范围 */
+  player: { x: number; z: number; limitX: number; limitZmin: number; limitZmax: number };
+  /** 玩家掩体（半高墙，蹲下可完全躲住） */
+  playerCover: { x: number; z: number; w: number; h: number; d: number };
+  spawns: SceneSpawn[];
+  props: SceneProp[];
+  fog: { near: number; far: number };
+  lamps: { x: number; y: number; z: number }[];
+  colors: { floor: number; wall: number; ceil: number; prop: number };
+}
+
+const SCENES: SceneDef[] = [
+  {
+    id: 'room3d',
+    name: '3D 训练房间',
+    desc: '14×26m 室内｜砖墙 · 木箱 · 沙袋 · 门洞',
+    range: '交战 5–11m',
+    room: { w: 14, d: 26, h: 3.2 },
+    door: { w: 1.4, h: 2.3, z: -6 },
+    player: { x: 0, z: 2.6, limitX: 4.2, limitZmin: -3.2, limitZmax: 2.9 },
+    playerCover: { x: 0.6, z: 0.9, w: 3.2, h: 1.3, d: 0.5 },
+    spawns: [
+      { id: '前左箱后', x: -3.8, z: -2.2, tier: 0 },
+      { id: '前右箱后', x: 3.8, z: -1.8, tier: 0 },
+      { id: '门后左', x: -1.8, z: -7.6, tier: 1 },
+      { id: '门后右', x: 1.8, z: -7.6, tier: 1 },
+    ],
+    props: [
+      { x: -1.9, z: -3.4, w: 1.2, h: 1.1, d: 1.2, kind: 'crate' },
+      { x: 2.2, z: -2.4, w: 3.2, h: 0.95, d: 0.4, kind: 'barrier' },
+      { x: -3.8, z: -2.2, w: 1.9, h: 1.95, d: 1.5, kind: 'crate' },
+      { x: 3.8, z: -1.8, w: 1.9, h: 1.95, d: 1.5, kind: 'crate' },
+      { x: -5.4, z: -1.2, w: 2.0, h: 0.7, d: 1.0, kind: 'sandbag' },
+    ],
+    fog: { near: 8, far: 34 },
+    lamps: [{ x: 6.1, y: 2.5, z: -1.5 }],
+    colors: { floor: 0x3b3730, wall: 0x9d8f79, ceil: 0x2a1e15, prop: 0x6b4a2c },
+  },
+  {
+    id: 'long',
+    name: '长地图 · 远距离交战',
+    desc: '26×84m 走廊｜四段纵深掩体 + 远端门洞',
+    range: '交战 14–42m（随难度拉远）',
+    room: { w: 26, d: 84, h: 4.2 },
+    door: { w: 2.2, h: 2.6, z: -34 },
+    player: { x: 0, z: 6, limitX: 8.5, limitZmin: -2, limitZmax: 9 },
+    playerCover: { x: 0, z: 4.3, w: 4.2, h: 1.15, d: 0.5 },
+    spawns: [
+      { id: '近箱左', x: -7.5, z: -8, tier: 0 },
+      { id: '近箱右', x: 7.5, z: -9.5, tier: 0 },
+      { id: '中墙左', x: -9.5, z: -15, tier: 1 },
+      { id: '中墙右', x: 9.5, z: -17, tier: 1 },
+      { id: '远箱左', x: -6.5, z: -23, tier: 2 },
+      { id: '远箱右', x: 6.5, z: -25, tier: 2 },
+      { id: '门后左', x: -2.4, z: -35.4, tier: 3 },
+      { id: '门后右', x: 2.4, z: -35.4, tier: 3 },
+    ],
+    props: [
+      // 近段：大木箱（14~16m）
+      { x: -7.5, z: -8, w: 2.1, h: 2.0, d: 1.7, kind: 'crate' },
+      { x: 7.5, z: -9.5, w: 2.1, h: 2.0, d: 1.7, kind: 'crate' },
+      // 中段：水泥矮墙（23~25m，横拉才是主要身位）
+      { x: -9.5, z: -15, w: 3.6, h: 1.3, d: 0.55, kind: 'barrier' },
+      { x: 9.5, z: -17, w: 3.6, h: 1.3, d: 0.55, kind: 'barrier' },
+      // 远段：箱堆（30~32m）
+      { x: -6.5, z: -23, w: 2.3, h: 1.9, d: 1.7, kind: 'crate' },
+      { x: 6.5, z: -25, w: 2.3, h: 1.9, d: 1.7, kind: 'crate' },
+      // 中段走廊里的散落掩体：给玩家一点遮挡，也让枪线不单调
+      { x: -3.2, z: -12, w: 1.6, h: 1.15, d: 1.6, kind: 'crate' },
+      { x: 3.6, z: -19, w: 1.6, h: 1.15, d: 1.6, kind: 'crate' },
+      // 门洞两侧（远端）
+      { x: -4.4, z: -32.6, w: 2.0, h: 1.8, d: 1.5, kind: 'crate' },
+      { x: 4.4, z: -32.6, w: 2.0, h: 1.8, d: 1.5, kind: 'crate' },
+      // 玩家侧沙袋装饰
+      { x: -6.2, z: 3.4, w: 2.2, h: 0.75, d: 1.0, kind: 'sandbag' },
+      { x: 6.2, z: 3.4, w: 2.2, h: 0.75, d: 1.0, kind: 'sandbag' },
+    ],
+    fog: { near: 30, far: 130 },
+    lamps: [
+      { x: 11.6, y: 3.5, z: -4 },
+      { x: -11.6, y: 3.5, z: -16 },
+      { x: 11.6, y: 3.5, z: -28 },
+    ],
+    colors: { floor: 0x343330, wall: 0x7f7869, ceil: 0x241d16, prop: 0x5b4530 },
+  },
+];
+
+const DEFAULT_SCENE_ID = 'room3d';
+const sceneById = (id: string | null): SceneDef => SCENES.find((s) => s.id === id) ?? SCENES[0];
+
+/**
+ * 难度 → 允许出现的最远刷新档位。
+ * 低难度只在近掩体拉出（先把近距离练稳），高难度才会用到 30m+ 的远掩体和远端门洞。
+ */
+const TIER_BY_DIFF: Record<string, number> = {
+  easy: 0,
+  normal: 1,
+  hard: 2,
+  insane: 3,
+  master: 3,
+  extreme: 3,
 };
 
 /**
@@ -377,23 +489,28 @@ function buildEnemy(): {
   };
 }
 
-/** 3D 房间：地面、天花板、墙、门洞、木箱、矮墙 */
-function buildRoom(): { root: THREE.Group; walls: THREE.Mesh[] } {
+/**
+ * 按场景表建造房间：地面、天花板、四面墙（后墙带门洞）、掩体道具、灯。
+ * 返回的 walls 同时是**碰撞体**（挡人）、**子弹目标**（挡弹/留弹孔）和**遮挡物**（判视线）。
+ */
+function buildRoom(def: SceneDef): { root: THREE.Group; walls: THREE.Mesh[] } {
   const root = new THREE.Group();
   const walls: THREE.Mesh[] = [];
-  const brick = makeMat({ color: 0x9d8f79, roughness: 0.92 });
-  const floorMat = makeMat({ color: 0x3b3730, roughness: 0.95 });
-  const ceilMat = makeMat({ color: 0x2a1e15, roughness: 0.9 });
-  const wood = makeMat({ color: 0x6b4a2c, roughness: 0.85 });
+  const brick = makeMat({ color: def.colors.wall, roughness: 0.92 });
+  const floorMat = makeMat({ color: def.colors.floor, roughness: 0.95 });
+  const ceilMat = makeMat({ color: def.colors.ceil, roughness: 0.9 });
+  const propMat = makeMat({ color: def.colors.prop, roughness: 0.86 });
+  const sandMat = makeMat({ color: 0x6b6146, roughness: 0.95 });
+  const R = def.room;
 
   // 地面 + 天花板
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(CONFIG.roomWidth, CONFIG.roomDepth), floorMat);
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(R.w, R.d), floorMat);
   floor.rotation.x = -Math.PI / 2;
   floor.receiveShadow = true;
   root.add(floor);
-  const ceil = new THREE.Mesh(new THREE.PlaneGeometry(CONFIG.roomWidth, CONFIG.roomDepth), ceilMat);
+  const ceil = new THREE.Mesh(new THREE.PlaneGeometry(R.w, R.d), ceilMat);
   ceil.rotation.x = Math.PI / 2;
-  ceil.position.y = CONFIG.roomHeight;
+  ceil.position.y = R.h;
   root.add(ceil);
 
   const wall = (w: number, h: number, d: number, x: number, y: number, z: number): THREE.Mesh => {
@@ -406,73 +523,36 @@ function buildRoom(): { root: THREE.Group; walls: THREE.Mesh[] } {
     return m;
   };
 
-  const halfW = CONFIG.roomWidth / 2;
+  const halfW = R.w / 2;
   // 两侧长墙
-  wall(0.3, CONFIG.roomHeight, CONFIG.roomDepth, -halfW, CONFIG.roomHeight / 2, 0);
-  wall(0.3, CONFIG.roomHeight, CONFIG.roomDepth, halfW, CONFIG.roomHeight / 2, 0);
+  wall(0.3, R.h, R.d, -halfW, R.h / 2, 0);
+  wall(0.3, R.h, R.d, halfW, R.h / 2, 0);
   // 后墙（含门洞）：左段 + 右段 + 门楣
-  const doorHalf = CONFIG.doorWidth / 2;
-  const backZ = CONFIG.doorZ - 0.6;
+  const doorHalf = def.door.w / 2;
+  const backZ = def.door.z - 0.6;
   const leftW = halfW - doorHalf;
-  wall(leftW, CONFIG.roomHeight, 0.3, -halfW + leftW / 2, CONFIG.roomHeight / 2, backZ);
-  wall(leftW, CONFIG.roomHeight, 0.3, halfW - leftW / 2, CONFIG.roomHeight / 2, backZ);
-  wall(CONFIG.doorWidth, CONFIG.roomHeight - CONFIG.doorHeight, 0.3, 0, CONFIG.doorHeight + (CONFIG.roomHeight - CONFIG.doorHeight) / 2, backZ);
+  wall(leftW, R.h, 0.3, -halfW + leftW / 2, R.h / 2, backZ);
+  wall(leftW, R.h, 0.3, halfW - leftW / 2, R.h / 2, backZ);
+  wall(def.door.w, R.h - def.door.h, 0.3, 0, def.door.h + (R.h - def.door.h) / 2, backZ);
   // 前墙（玩家背后，避免穿帮）
-  wall(CONFIG.roomWidth, CONFIG.roomHeight, 0.3, 0, CONFIG.roomHeight / 2, CONFIG.roomDepth / 2);
+  wall(R.w, R.h, 0.3, 0, R.h / 2, R.d / 2);
 
-  // 木箱掩体
-  const crate = new THREE.Mesh(
-    new THREE.BoxGeometry(CONFIG.crate.w, CONFIG.crate.h, CONFIG.crate.d),
-    wood,
-  );
-  crate.position.set(CONFIG.crate.x, CONFIG.crate.h / 2, CONFIG.crate.z);
-  crate.castShadow = true;
-  crate.receiveShadow = true;
-  crate.userData.isCover = true;
-  root.add(crate);
-  walls.push(crate);
-
-  // 矮墙（第二个掩体）
-  const lowWall = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.95, 0.4), brick);
-  lowWall.position.set(2.2, 0.475, -2.4);
-  lowWall.castShadow = true;
-  lowWall.receiveShadow = true;
-  lowWall.userData.isCover = true;
-  root.add(lowWall);
-  walls.push(lowWall);
-
-  // 场景道具：沙袋堆（左后）与壁灯（暖光）
-  const sandMat = makeMat({ color: 0x6b6146, roughness: 0.95 });
-  for (let row = 0; row < 2; row++) {
-    for (let i = 0; i < 3 - row; i++) {
-      const bag = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 8), sandMat);
-      bag.scale.set(1.25, 0.72, 0.85);
-      bag.position.set(-5.4 + i * 0.72 + row * 0.36, 0.22 + row * 0.32, -1.2);
-      bag.castShadow = true;
-      bag.receiveShadow = true;
-      root.add(bag);
+  // 掩体 / 道具：沙袋是纯装饰（不挡子弹），其余都是实体（挡人 + 挡弹 + 挡视线）
+  for (const p of def.props) {
+    if (p.kind === 'sandbag') {
+      // 沙袋堆：三个球体叠出来的观感，便宜且好看
+      for (let i = 0; i < 3; i++) {
+        const bag = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 8), sandMat);
+        bag.scale.set(1.25, 0.72, 0.85);
+        bag.position.set(p.x - 0.7 + i * 0.7, 0.22 + (p.h - 0.4) * 0.5, p.z);
+        bag.castShadow = true;
+        bag.receiveShadow = true;
+        root.add(bag);
+      }
+      continue;
     }
-  }
-  // 壁灯：自发光方块 + 暖色点光
-  const lampBody = new THREE.Mesh(
-    new THREE.BoxGeometry(0.5, 0.12, 0.24),
-    new THREE.MeshStandardMaterial({ color: 0x2a2724, emissive: 0xffd9a0, emissiveIntensity: 0.6 }),
-  );
-  lampBody.position.set(CONFIG.roomWidth / 2 - 0.5, 2.6, -1.5);
-  root.add(lampBody);
-  const lamp = new THREE.PointLight(0xffd2a0, 5.5, 12, 2);
-  lamp.position.set(CONFIG.roomWidth / 2 - 0.9, 2.5, -1.5);
-  root.add(lamp);
-
-  // 正面掩体箱：敌人只从**玩家正面**的掩体后出现（门口 + 前侧），不再有身后刷新
-  const flankCrate = makeMat({ color: 0x5f452c, roughness: 0.88 });
-  for (const p of [
-    { x: -3.8, z: -2.2 },
-    { x: 3.8, z: -1.8 },
-  ]) {
-    // 高箱：站立的敌人也能完全藏在后面（顶面 1.95m > 敌人头顶 ~1.77m）
-    const m = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.95, 1.5), flankCrate);
-    m.position.set(p.x, 0.975, p.z);
+    const m = new THREE.Mesh(new THREE.BoxGeometry(p.w, p.h, p.d), propMat);
+    m.position.set(p.x, p.h / 2, p.z);
     m.castShadow = true;
     m.receiveShadow = true;
     m.userData.isCover = true;
@@ -480,16 +560,39 @@ function buildRoom(): { root: THREE.Group; walls: THREE.Mesh[] } {
     walls.push(m);
   }
 
+  // 灯：自发光方块 + 暖色点光（点光数量在建场景时定死，运行时不改 → 不会触发着色器重编译）
+  const lampBodyMat = new THREE.MeshStandardMaterial({ color: 0x2a2724, emissive: 0xffd9a0, emissiveIntensity: 0.6 });
+  for (const l of def.lamps) {
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.12, 0.26), lampBodyMat);
+    body.position.set(l.x, l.y, l.z);
+    root.add(body);
+    const lamp = new THREE.PointLight(0xffd2a0, 5.5, 18, 2);
+    lamp.position.set(l.x, l.y - 0.1, l.z);
+    root.add(lamp);
+  }
+
   return { root, walls };
 }
 
 /** 入口：把 3D 切片挂到指定容器 */
 export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () => void {
+  /**
+   * 当前场景：主页"场景"单元选择的结果，存 localStorage。
+   * 必须在拼 HTML **之前**就确定——场景卡片上的"当前"标记要按它渲染。
+   */
+  let storedScene: string | null = null;
+  try {
+    storedScene = localStorage.getItem('jg.slice3d.scene');
+  } catch {
+    storedScene = null;
+  }
+  const SCENE = sceneById(storedScene);
   container.innerHTML = `
     <div class="slice3d">
       <canvas id="c3d"></canvas>
       <div class="s3-hud s3-left">
-        <div class="s3-title">3D 试验版 · 垂直切片</div>
+        <div class="s3-title" id="s3-scene-title">${SCENE.name}</div>
+        <div class="s3-line" id="s3-scene-range">${SCENE.range}</div>
         <div class="s3-line">版本 ${BUILD_STAMP}</div>
         <div class="s3-line">鼠标转视角 · WASD 移动 · Ctrl 下蹲</div>
         <div class="s3-line">按住左键连发 · R 换弹 · Esc 退出</div>
@@ -521,15 +624,18 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
             <section class="s3-sec">
               <div class="s3-sec-head"><b>1</b>场景</div>
               <div class="s3-scene-list" id="s3-scene-row">
-                <button class="s3-scene is-on" data-scene="room3d" type="button">
-                  <i class="s3-scene-thumb" aria-hidden="true"></i>
+                ${SCENES.map(
+                  (s) => `<button class="s3-scene${s.id === SCENE.id ? ' is-on' : ''}" data-scene="${s.id}" type="button">
+                  <i class="s3-scene-thumb s3-thumb-${s.id}" aria-hidden="true"></i>
                   <span class="s3-scene-txt">
-                    <b>3D 训练房间</b>
-                    <em>砖墙 · 木箱 · 沙袋 · 门洞｜掩体挡人挡弹</em>
+                    <b>${s.name}</b>
+                    <em>${s.desc}<br>${s.range}</em>
                   </span>
-                  <span class="s3-scene-tag">当前</span>
-                </button>
+                  ${s.id === SCENE.id ? '<span class="s3-scene-tag">当前</span>' : ''}
+                </button>`,
+                ).join('')}
               </div>
+              <p class="s3-hint">切换场景会自动重载一次（房间要按新尺寸重建）。</p>
               <div class="s3-field">
                 <label>玩家掩体</label>
                 <div class="s3-pills">
@@ -928,11 +1034,22 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     writeStore(CH_KEY, crosshair);
     refreshChUI();
   });
-  // 场景单元：当前只有一个房间，点一下只是给个反馈（真正的多场景后面单独做）
+  // 场景单元：切换场景要按新尺寸重建整个房间，所以保存后重载一次（最稳、不会留下半旧状态）
   container.querySelectorAll<HTMLButtonElement>('#s3-scene-row [data-scene]').forEach((b) => {
     b.addEventListener('click', () => {
-      b.classList.add('is-on');
-      showBanner('场景：3D 训练房间');
+      const id = b.dataset.scene ?? DEFAULT_SCENE_ID;
+      if (id === SCENE.id) {
+        showBanner(`场景：${SCENE.name}`);
+        return;
+      }
+      try {
+        localStorage.setItem('jg.slice3d.scene', id);
+      } catch {
+        // 存不进去也不影响本意：下面直接重载也会读不到，最差是留在原场景
+      }
+      const next = sceneById(id);
+      showBanner(`场景切换到「${next.name}」，正在重建…`);
+      window.setTimeout(() => window.location.reload(), 550);
     });
   });
   refreshSensUI();
@@ -963,10 +1080,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0d0f12);
-  scene.fog = new THREE.Fog(0x0d0f12, 8, 34);
+  // 长地图的雾必须推远，否则 30m 外的敌人会直接糊掉——这是"远距离交战"的前提
+  scene.fog = new THREE.Fog(0x0d0f12, SCENE.fog.near, SCENE.fog.far);
 
   const camera = new THREE.PerspectiveCamera(75, 1, 0.05, 200);
-  camera.position.set(0, CONFIG.eyeHeight, 2.6);
+  camera.position.set(SCENE.player.x, CONFIG.eyeHeight, SCENE.player.z);
   camera.rotation.order = 'YXZ';
 
   // 光照：环境 + 半球 + 右侧暖色主光（带阴影）+ 门口点光
@@ -984,10 +1102,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   sun.shadow.camera.bottom = -6;
   scene.add(sun);
   const doorLight = new THREE.PointLight(0xffc98a, 6, 14, 2);
-  doorLight.position.set(0, 2.4, CONFIG.doorZ - 0.4);
+  doorLight.position.set(0, 2.4, SCENE.door.z - 0.4);
   scene.add(doorLight);
 
-  const room = buildRoom();
+  const room = buildRoom(SCENE);
   scene.add(room.root);
 
   /* ---------------- 实体碰撞（掩体/墙体：挡人 + 挡子弹） ----------------
@@ -1091,7 +1209,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     playerCoverMeshes = [];
 
     if (coverState.on) {
-      const c = CONFIG.playerCover;
+      const c = SCENE.playerCover;
       const mat = makeMat({ color: 0x8a8172, roughness: 0.92 });
       const wallMesh = new THREE.Mesh(new THREE.BoxGeometry(c.w, c.h, c.d), mat);
       wallMesh.position.set(c.x, c.h / 2, c.z);
@@ -1234,20 +1352,28 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     }
     return false;
   };
-  /** 挑选合法刷新点：视线外 + 距离 ≥ 4 米；都不满足时退化为最远的掩体点 */
+  /**
+   * 挑选合法刷新点：视线外 + 距离 ≥ 4 米 + 难度允许的距离档位；
+   * 都不满足时退化为"背墙后的门后点"（墙通高，任何站姿都挡得住）。
+   * 档位过滤是"长地图"的关键：低难度只从近掩体拉出，高难度才用 30m+ 的远掩体。
+   */
   const pickSpawnPoint = (): { x: number; z: number; id: string; fallback: boolean } => {
     const px = camera.position.x;
     const pz = camera.position.z;
-    const valid = CONFIG.covers.filter((c) => {
+    const maxTier = TIER_BY_DIFF[sliceDiff] ?? 1;
+    const valid = SCENE.spawns.filter((c) => {
       // 硬性规则：只在玩家**正面**刷新（至少 1.5m 在前方），杜绝"从背后冒出来"
       if (c.z > pz - 1.5) return false;
+      // 难度越高，允许的刷新距离越远
+      if (c.tier > maxTier) return false;
       if (Math.hypot(c.x - px, c.z - pz) < CONFIG.spawn.minDistance) return false;
       return !isVisibleFromPlayer(new THREE.Vector3(c.x, 0, c.z));
     });
     // 兜底：若没有任何点通过严格遮挡测试，就固定用"背墙后的门后点"——
     // 墙是通高的，任何站姿/蹲姿都挡得住，绝不会刷在玩家眼前
-    const behindWall = CONFIG.covers.filter((c) => c.z < -6.4);
-    const pool = valid.length > 0 ? valid : behindWall;
+    const behindWall = SCENE.spawns.filter((c) => c.z <= SCENE.door.z);
+    // 三级兜底，任何情况下都不能让 pool 为空（会直接崩在 pick.x 上）
+    const pool = valid.length > 0 ? valid : behindWall.length > 0 ? behindWall : SCENE.spawns;
     const pick = pool[Math.floor(Math.random() * pool.length)];
     return { ...pick, fallback: valid.length === 0 };
   };
@@ -1432,8 +1558,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     //  - 门后刷新：先走到门洞中线，再出门口拉出
     //  - 其他掩体：先横移到掩体侧面边缘，再从侧面走出来（也正好是"横拉出掩体"的观感）
     const path: THREE.Vector3[] = [];
-    if (cover.z < -6.4) {
-      path.push(new THREE.Vector3(0, 0, -6.0));
+    if (cover.z <= SCENE.door.z) {
+      // 门后刷新：先走到门洞中线（z = 门洞平面），再出门口拉出
+      path.push(new THREE.Vector3(0, 0, SCENE.door.z));
     } else {
       const box = nearestCollider(spawnX, spawnZ);
       if (box) {
@@ -1500,6 +1627,17 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     look: () => ({ yaw: +yaw.toFixed(4), pitch: +pitch.toFixed(4) }),
     /** 只读：当前主页设置（自检用来核对菜单与运行时是否一致） */
     settings: () => ({ sens: { ...sensProfile }, crosshair: { ...crosshair } }),
+    /** 只读：当前场景信息（自检用来确认"切了场景真的重建了房间"；注意 scene 已被 THREE.Scene 占用） */
+    sceneInfo: () => ({
+      id: SCENE.id,
+      name: SCENE.name,
+      room: { ...SCENE.room },
+      spawns: SCENE.spawns.length,
+      walls: room.walls.length,
+      fog: [SCENE.fog.near, SCENE.fog.far],
+      limits: { x: SCENE.player.limitX, zmin: SCENE.player.limitZmin, zmax: SCENE.player.limitZmax },
+      player: { x: +camera.position.x.toFixed(2), z: +camera.position.z.toFixed(2) },
+    }),
     rifle,
     parts: { mag: magPart, charging: chargingPart },
     perf: () => ({
@@ -1718,7 +1856,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const shotRecords: ShotRecord[] = [];
   const encounterRecords: EncounterRecord[] = [];
   let currentEncounter: Partial<EncounterRecord> | null = null;
-  const playerPos = new THREE.Vector3(0, CONFIG.eyeHeight, 2.6);
+  const playerPos = new THREE.Vector3(SCENE.player.x, CONFIG.eyeHeight, SCENE.player.z);
   const playerVel = new THREE.Vector3();
 
   const decals: THREE.Mesh[] = [];
@@ -2440,8 +2578,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     playerPos.addScaledVector(playerVel, dt);
     // 需求④：移动期间持续清零连射累积（急停后第一发必定精准）
     if (playerVel.length() > 0.4) burst = 0;
-    playerPos.x = Math.max(-CONFIG.moveLimitX, Math.min(CONFIG.moveLimitX, playerPos.x));
-    playerPos.z = Math.max(-CONFIG.moveLimitZ, Math.min(2.9, playerPos.z));
+    // 活动范围按场景给（长地图更宽、纵深深一点，但仍然离敌人很远）
+    playerPos.x = Math.max(-SCENE.player.limitX, Math.min(SCENE.player.limitX, playerPos.x));
+    playerPos.z = Math.max(SCENE.player.limitZmin, Math.min(SCENE.player.limitZmax, playerPos.z));
     const eye = crouching ? CONFIG.crouchHeight : CONFIG.eyeHeight;
     camera.position.set(playerPos.x, eye + Math.sin(now * 0.002) * 0.006, playerPos.z);
     camera.position.y += (eye - camera.position.y) * Math.min(1, dt * 10);

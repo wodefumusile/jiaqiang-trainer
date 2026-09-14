@@ -637,6 +637,15 @@ body.s3-hurt::after {
     linear-gradient(180deg, #3a2f26 0 42%, #6b4a2c 42% 52%, #2b2019 52% 100%);
 }
 
+/* 长地图缩略图：一条拉长的走廊透视 */
+.s3-scene-thumb.s3-thumb-long {
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0 2px, transparent 2px 100%),
+    repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.25) 0 3px, transparent 3px 9px),
+    linear-gradient(180deg, #2b2a27 0 38%, #4a4238 38% 46%, #232120 46% 100%);
+  background-size: 100% 100%, 100% 100%, 100% 100%;
+}
+
 .s3-scene-txt {
   display: flex;
   flex-direction: column;
