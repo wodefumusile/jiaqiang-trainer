@@ -31,7 +31,7 @@ import {
 import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-1.1';
+const BUILD_STAMP = 'v3d-1.2';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -43,8 +43,13 @@ const CONFIG = {
   moveSpeed: 3.4,
   /** 敌人停下后的开火前摇（秒） */
   enemyAimTime: [0.55, 0.95],
-  /** 敌人移动速度（米/秒） */
-  enemySpeed: 1.9,
+  /**
+   * 敌人移动速度（米/秒）。
+   * 修正视线判定后（敌人不能再"隔着掩体看见你"），它必须真的走出来才可能有枪线，
+   * 原来 1.9m/s 会让拉出过程拖到 3 秒以上，显得又蠢又慢。
+   * 3.0m/s 接近真人横向拉枪的速度（CS2 步枪移动约 4m/s，假动作冲刺更快）。
+   */
+  enemySpeed: 3.0,
   /** 刷新约束：离玩家最小距离（米）与判定用眼高 */
   spawn: { minDistance: 4, headHeight: 1.6 },
 };
@@ -114,16 +119,18 @@ const SCENES: SceneDef[] = [
     { id: '前右箱后', x: 3.8, z: -1.8, tier: 0 },
     { id: '门后左', x: -1.8, z: -7.6, tier: 1 },
     { id: '门后右', x: 1.8, z: -7.6, tier: 1 },
-    { id: '左中矮墙后', x: -5.4, z: -4.4, tier: 1 },
-    { id: '右中矮墙后', x: 5.2, z: -4.0, tier: 1 },
+    // 注意：这两个点原来摆得太靠侧墙（离墙不到 1m），敌人会被"墙 + 掩体"夹住出不来。
+    // 刷新点必须留出至少一个身位的横拉空间 —— 这条经验同样适用于以后新增的点。
+    { id: '左中矮墙后', x: -4.4, z: -4.4, tier: 1 },
+    { id: '右中矮墙后', x: 4.4, z: -4.0, tier: 1 },
   ],
   props: [
     { x: -1.9, z: -3.4, w: 1.2, h: 1.1, d: 1.2, kind: 'crate' },
     { x: 2.2, z: -2.4, w: 3.2, h: 0.95, d: 0.4, kind: 'barrier' },
     { x: -3.8, z: -2.2, w: 1.9, h: 1.95, d: 1.5, kind: 'crate' },
     { x: 3.8, z: -1.8, w: 1.9, h: 1.95, d: 1.5, kind: 'crate' },
-    { x: -5.4, z: -4.4, w: 1.7, h: 1.95, d: 1.4, kind: 'barrier' },
-    { x: 5.2, z: -4.0, w: 1.7, h: 1.95, d: 1.4, kind: 'crate' },
+    { x: -4.4, z: -4.4, w: 1.7, h: 1.95, d: 1.4, kind: 'barrier' },
+    { x: 4.4, z: -4.0, w: 1.7, h: 1.95, d: 1.4, kind: 'crate' },
     { x: -5.4, z: -1.2, w: 2.0, h: 0.7, d: 1.0, kind: 'sandbag' },
   ],
     fog: { near: 8, far: 34 },
@@ -192,6 +199,12 @@ const SCENES: SceneDef[] = [
 
 const DEFAULT_SCENE_ID = 'room3d';
 const sceneById = (id: string | null): SceneDef => SCENES.find((s) => s.id === id) ?? SCENES[0];
+
+/**
+ * 玩家躲进掩体、敌人失去视线之后，再重新露头时敌人至少要重新瞄这么久（秒）。
+ * 不加这条的话，前摇会在玩家躲着的时候偷偷倒完 → 一探头就是零反应时间的秒杀。
+ */
+const AIM_REACQUIRE_SEC = 0.55;
 
 /**
  * 难度 → 各距离档位的**权重**（不是开关）。
@@ -1260,16 +1273,25 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
   applyCoverSetting();
 
-  /** 敌人视线判定：从敌人眼睛到玩家相机，被玩家掩体挡住则返回 false */
+  /**
+   * 敌人视线判定（**修 bug**：原来这里只检查"玩家自己那块半高墙"，
+   * 导致玩家躲到木箱/水泥墙/侧墙后面照样被打——主观感受就是"穿墙打我"。
+   * 而且玩家掩体开关一旦关掉，这里直接 return true，等于全图无遮挡）。
+   *
+   * 现在改成：对**所有实体**（墙体 + 所有掩体 + 玩家掩体）做遮挡判定，
+   * 并且射线起点用敌人**真实的头部高度**（站立约 1.57m / 蹲下约 1.34m），
+   * 避免出现"它自己明明被掩体挡着、却能一枪打过来"的穿墙观感。
+   */
   const losRay = new THREE.Raycaster();
   const enemyHasLineOfSight = (): boolean => {
-    if (playerCoverMeshes.length === 0) return true;
-    const from = _v1.set(enemy.group.position.x, 1.5, enemy.group.position.z);
+    const g = enemy.group;
+    const eyeY = g.position.y + 1.63 * g.scale.y;
+    const from = _v1.set(g.position.x, eyeY, g.position.z);
     const dir = _v2.copy(camera.position).sub(from);
     const dist = dir.length();
     losRay.set(from, dir.normalize());
     losRay.far = dist;
-    return losRay.intersectObjects(playerCoverMeshes, false).length === 0;
+    return losRay.intersectObjects(room.walls, false).length === 0;
   };
 
   // 复用的临时向量：避免每帧 new 出一堆 Vector3（减少 GC 抖动/卡顿）
@@ -1284,7 +1306,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
    *   · 全程身体与枪口朝玩家（不是朝移动方向）
    *   · 撞到实体沿面滑动，卡住则换下一个候选枪线位 */
   const enemyLineClear = (x: number, z: number): boolean => {
-    const from = _v1.set(x, 1.5, z);
+    // 与 enemyHasLineOfSight 用同一套判定与同一高度（敌人真实头部高度）
+    const g = enemy.group;
+    const from = _v1.set(x, g.position.y + 1.63 * g.scale.y, z);
     const dir = _v2.copy(camera.position).sub(from);
     const dd = dir.length();
     losRay.set(from, dir.normalize());
@@ -1748,6 +1772,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       limits: { x: SCENE.player.limitX, zmin: SCENE.player.limitZmin, zmax: SCENE.player.limitZmax },
       player: { x: +camera.position.x.toFixed(2), z: +camera.position.z.toFixed(2) },
     }),
+    /** 只读：实体碰撞盒（自检用来做"线段是否被掩体挡住"的几何验证） */
+    colliders: () =>
+      colliders.map((b) => ({
+        min: [+b.min.x.toFixed(2), +b.min.y.toFixed(2), +b.min.z.toFixed(2)],
+        max: [+b.max.x.toFixed(2), +b.max.y.toFixed(2), +b.max.z.toFixed(2)],
+      })),
     rifle,
     parts: { mag: magPart, charging: chargingPart },
     perf: () => ({
@@ -1777,6 +1807,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     /** 测试钩子：模拟"循环冻结"，用于验证看门狗能自动恢复 */
     forceStall: () => {
       lastLoopTick = performance.now() - 9999;
+    },
+    /** 测试钩子：把玩家放到指定位置（自检用：验证"躲在箱子后面敌人到底看不看得见"） */
+    setPlayer: (x: number, z: number) => {
+      playerPos.set(x, CONFIG.eyeHeight, z);
+      camera.position.set(x, CONFIG.eyeHeight, z);
+      playerVel.set(0, 0, 0);
     },
     setQuality: (q: 'high' | 'medium' | 'low') => {
       autoQuality = false;
@@ -2932,7 +2968,6 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         }
       }
     } else if (enemyAI.state === 'aiming') {
-      enemyAI.timer -= dt;
       // 举枪瞄准姿态：双臂前伸，随瞄准进度抬起
       enemyAI.aimPose = Math.min(1, enemyAI.aimPose + dt * 3);
       enemy.leftArm.rotation.x = -1.25 * enemyAI.aimPose;
@@ -2986,6 +3021,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       const hasLos = enemyHasLineOfSight();
       if (!hasLos) {
         enemyAI.blocked += dt;
+        // 玩家躲好了：这一枪不该"憋着"等他探头再秒射（那是零反应时间）。
+        // 躲超过 0.5 秒就重置前摇，玩家重新露头时仍然有完整的反应窗口。
+        if (enemyAI.blocked > 0.5) enemyAI.timer = Math.max(enemyAI.timer, AIM_REACQUIRE_SEC);
         if (enemyAI.blocked > 1.2) {
           enemyAI.blocked = 0;
           if (enemyAI.canChangeCover) {
@@ -3007,7 +3045,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
           }
           enemyAI.state = 'walking';
         }
-      } else if (enemyAI.timer <= 0) {
+      } else {
+        // 只有真的看得见玩家时，开火前摇才推进
+        enemyAI.timer -= dt;
+        enemyAI.blocked = 0;
+        if (enemyAI.timer > 0) return;
         // 需求⑦-C2：尽量把这一枪留在"急停"里开；但最多等 0.7 秒，别把玩家晾着
         if (enemyAI.strafeShoot && enemyAI.strafePauseT <= 0) {
           enemyAI.strafeWaitT += dt;
