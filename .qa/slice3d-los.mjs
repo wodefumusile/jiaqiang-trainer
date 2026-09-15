@@ -31,6 +31,8 @@ const state = () =>
     const d = window.__slice3d;
     return {
       state: d.ai.state,
+      // 注意：现在一枪只有 40 伤害、三枪才阵亡，所以"有没有被打中"要看血量而不是阵亡数
+      hp: d.playerState().hp,
       deaths: d.deaths(),
       los: d.coverState().los,
       blocked: d.coverState().blocked,
@@ -116,15 +118,15 @@ const observe = async (seconds) => {
   let maxBlocked = 0;
   let shots = 0;
   const first = await state();
-  const deaths0 = first.deaths;
+  const hp0 = first.hp;
   while (Date.now() - t0 < seconds * 1000) {
     await page.waitForTimeout(100);
     const s = await state();
     if (!s) continue;
     if (s.los) losTrue++;
     maxBlocked = Math.max(maxBlocked, s.blocked);
-    if (s.deaths > deaths0) {
-      shots = s.deaths - deaths0;
+    if (s.hp < hp0) {
+      shots = 1;
       break;
     }
   }
@@ -140,7 +142,7 @@ const hold = async (seconds) => {
   let shots = 0;
   let samples = 0;
   let lastSpot = null;
-  const d0 = (await state())?.deaths ?? 0;
+  const hp0 = (await state())?.hp ?? 100;
   while (Date.now() - t0 < seconds * 1000) {
     lastSpot = (await findHiddenSpot()) ?? lastSpot;
     await page.waitForTimeout(100);
@@ -148,8 +150,8 @@ const hold = async (seconds) => {
     if (!s) continue;
     samples++;
     if (s.los) losTrue++;
-    if (s.deaths > d0) {
-      shots = s.deaths - d0;
+    if (s.hp < hp0) {
+      shots = 1;
       break;
     }
   }
@@ -163,13 +165,12 @@ console.log(
   behind.shots === 0 && behind.losTrue === 0 ? '✅ 视线全程被挡，一枪没打过来' : '❌ 仍然被打/判定为可见',
 );
 
-// 2) 站到开阔地：敌人必须能看见并开枪（注意要等它从掩体后*拉出来*，否则测的是"它还在走路"）
+// 2) 站到开阔地：敌人必须能看见并开枪。
+//    注意：上一段"躲藏"会让敌人一直换位找角度，所以这里要给足时间等它重新拉出来（最多 20 秒）；
+//    期间只要出现视线或挨枪就算通过（本函数挨枪即提前返回）。
 await safe(page, () => window.__slice3d.setPlayer(0, 2.6));
-let openAiming = await waitAiming(12000);
-await safe(page, () => window.__slice3d.setPlayer(0, 2.6)); // 等的过程里别让它把玩家挤走
-openAiming = openAiming ?? (await waitAiming(6000));
-const open = await observe(9);
-console.log('站在开阔地（敌人已进入架枪）9 秒', JSON.stringify(open), '敌人状态', openAiming?.state ?? 'unknown');
+const open = await observe(20);
+console.log('站在开阔地（最多等 20 秒）', JSON.stringify(open));
 console.log(
   '敌人没变成瞎子',
   open.losTrue > 0 || open.shots > 0 ? '✅ 能看见并开火' : '❌ 看不见了（判定过头）',

@@ -31,7 +31,7 @@ import {
 import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-1.3';
+const BUILD_STAMP = 'v3d-1.4';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -205,6 +205,23 @@ const sceneById = (id: string | null): SceneDef => SCENES.find((s) => s.id === i
  * 不加这条的话，前摇会在玩家躲着的时候偷偷倒完 → 一探头就是零反应时间的秒杀。
  */
 const AIM_REACQUIRE_SEC = 0.55;
+
+/**
+ * 敌人一枪对玩家造成的伤害。
+ * 100 = 一枪毙命；40 = 三枪才死（贴近步枪的身体伤害：100 → 60 → 20 → 0）。
+ * 想调难度改这一个数就够了。
+ */
+const ENEMY_SHOT_DAMAGE = 40;
+
+/** 死亡动画：倒地用时（毫秒） */
+const DEATH_FALL_MS = 1200;
+/** 从阵亡到弹出「你死了」的总时长（毫秒）——需求要求 3 秒左右 */
+const DEATH_TEXT_MS = 2800;
+
+/** 连续阵亡次数存在这里（跨局、跨刷新保留；打满目标完成一局才清零） */
+const STREAK_KEY = 'jg.slice3d.deathStreak';
+/** 连续死几次开始嘲讽 */
+const TAUNT_AT = 3;
 
 /**
  * 难度 → 各距离档位的**权重**（不是开关）。
@@ -650,6 +667,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       <div class="s3-dmg" id="s3-dmg"></div>
       <div class="s3-banner" id="s3-banner"></div>
       <div class="s3-lock-hint hidden" id="s3-lock-hint">点击画面以捕获鼠标（否则无法转视角）</div>
+      <!-- 阵亡界面：先播死亡动画，约 3 秒后弹出大字，点击任意处回开始界面 -->
+      <div class="s3-dead hidden" id="s3-dead">
+        <div class="s3-dead-text" id="s3-dead-text">你死了</div>
+        <div class="s3-dead-streak" id="s3-dead-streak"></div>
+        <div class="s3-dead-hint">点击任意处返回开始界面</div>
+      </div>
       <div class="s3-overlay" id="s3-overlay">
         <div class="s3-card s3-menu-card">
           <div class="s3-menu-head">
@@ -846,6 +869,9 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const benchOut = container.querySelector<HTMLElement>('#s3-bench-out')!;
   const lastLogEl = container.querySelector<HTMLElement>('#s3-lastlog')!;
   const lockHintEl = container.querySelector<HTMLElement>('#s3-lock-hint')!;
+  const deathEl = container.querySelector<HTMLElement>('#s3-dead')!;
+  const deathTextEl = container.querySelector<HTMLElement>('#s3-dead-text')!;
+  const deathStreakEl = container.querySelector<HTMLElement>('#s3-dead-streak')!;
   /**
    * 关键：场景构建需要几百毫秒，如果用户在构建完成前点"点击进入"，这一下会被丢掉
    * （表现就是"点了没反应 / 卡住动不了"，时好时坏）。这里在最开头就记下点击意图，
@@ -872,41 +898,37 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   /** 当前环境是否不支持"原始输入"（raw input）——不支持就退回普通指针锁定 */
   let rawInputUnsupported = false;
   const tryLock = (): void => {
+    /**
+     * 统一封装指针锁定请求：**同步异常和 Promise 拒绝全部吞掉**。
+     * 原因：连续点击时浏览器会抛 "Pointer lock pending"，如果不 catch，
+     * 控制台会刷一堆未处理的 Promise 拒绝（看着像 bug，实际只是重试）。
+     */
+    const req = (opts?: { unadjustedMovement?: boolean }): Promise<void> | undefined => {
+      try {
+        const p = (canvas.requestPointerLock as (o?: { unadjustedMovement?: boolean }) => unknown)(opts) as
+          | Promise<void>
+          | undefined;
+        if (p && typeof p.catch === 'function') p.catch(() => undefined);
+        return p;
+      } catch {
+        return undefined; // 点击画面会重试
+      }
+    };
     // 环境不支持 raw input 时记住，之后一律走普通锁定（避免每次都要多失败一轮）
     if (rawInputUnsupported) {
-      try {
-        canvas.requestPointerLock();
-      } catch {
-        // 忽略：点击画面会重试
-      }
+      req();
       return;
     }
-    try {
-      // 关键（手感/安全）：请求"原始输入" unadjustedMovement。
-      // 不开它的话，浏览器给我们的 movementX 是**经过系统鼠标加速处理**的位移，
-      // 于是"度/计数"的换算在快速甩枪时会被放大 —— 表现就是视角突然不受控地甩出去。
-      // 不支持该选项的环境会自动回退到普通锁定（下面 catch 里兜底）。
-      const p = (canvas.requestPointerLock as (o?: { unadjustedMovement?: boolean }) => unknown)({
-        unadjustedMovement: true,
-      }) as Promise<void> | undefined;
-      if (p && typeof p.catch === 'function') {
-        p.catch(() => {
-          // 某些驱动/系统不支持 raw input：退回普通锁定，绝不抛异常打断进入流程
-          rawInputUnsupported = true;
-          try {
-            canvas.requestPointerLock();
-          } catch {
-            // 忽略：点击画面会重试
-          }
-        });
-      }
-    } catch {
-      rawInputUnsupported = true;
-      try {
-        canvas.requestPointerLock();
-      } catch {
-        // 忽略：点击画面会重试
-      }
+    // 关键（手感/安全）：请求"原始输入" unadjustedMovement。
+    // 不开它的话，浏览器给我们的 movementX 是**经过系统鼠标加速处理**的位移，
+    // 于是"度/计数"的换算在快速甩枪时会被放大 —— 表现就是视角突然不受控地甩出去。
+    const p = req({ unadjustedMovement: true });
+    if (p) {
+      p.catch(() => {
+        // 某些驱动/系统不支持 raw input：退回普通锁定
+        rawInputUnsupported = true;
+        req();
+      });
     }
   };
 
@@ -1852,6 +1874,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       camera.position.set(x, CONFIG.eyeHeight, z);
       playerVel.set(0, 0, 0);
     },
+    /** 测试钩子：对玩家造成伤害（与敌人开火走同一条代码路径，用于验证死亡流程） */
+    hurtPlayer: (dmg = ENEMY_SHOT_DAMAGE) => damagePlayer(dmg),
+    /** 只读：玩家血量 / 是否阵亡 / 连续阵亡次数 */
+    playerState: () => ({ hp: playerHp, dead: playerDead, streak: deathStreak }),
     setQuality: (q: 'high' | 'medium' | 'low') => {
       autoQuality = false;
       applyQuality(q);
@@ -2042,6 +2068,19 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   let currentEncounter: Partial<EncounterRecord> | null = null;
   const playerPos = new THREE.Vector3(SCENE.player.x, CONFIG.eyeHeight, SCENE.player.z);
   const playerVel = new THREE.Vector3();
+  /** 玩家真实血量：敌人每一枪扣 ENEMY_SHOT_DAMAGE，归零即阵亡 */
+  let playerHp = 100;
+  /** 是否处于阵亡流程（死亡动画 / 阵亡界面）——期间不接受任何输入 */
+  let playerDead = false;
+  /** 阵亡开始的时刻（用于驱动死亡动画时间轴） */
+  let deathStartAt = 0;
+  /** 连续阵亡次数：完成一局（打满目标人数）才清零；跨局、跨刷新保留 */
+  let deathStreak = 0;
+  try {
+    deathStreak = Math.max(0, Number(localStorage.getItem(STREAK_KEY) ?? '0') || 0);
+  } catch {
+    deathStreak = 0;
+  }
 
   const decals: THREE.Mesh[] = [];
   const sparks: { mesh: THREE.Mesh; vel: THREE.Vector3; life: number }[] = [];
@@ -2266,6 +2305,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
   /* ---------------- 事件绑定 ---------------- */
   const onKeyDown = (e: KeyboardEvent): void => {
+    // 阵亡流程里不接受任何按键（否则会因为 Esc 之类的键打断死亡动画）
+    if (playerDead) return;
     keys.add(e.code);
     // 吃掉浏览器默认行为（F1 帮助页之类）
     if (['KeyP', 'KeyC', 'KeyR', 'KeyF', 'Tab'].includes(e.code)) e.preventDefault();
@@ -2293,7 +2334,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     if (e.code === 'ControlLeft' || e.code === 'ControlRight') crouching = false;
   };
   const onMouseMove = (e: MouseEvent): void => {
-    if (!running || document.pointerLockElement !== canvas) return;
+    if (playerDead || !running || document.pointerLockElement !== canvas) return;
     // 刚命中指针锁定的前 120ms 不采样：浏览器/系统在这时会补交一个很大的位移
     // （经典的 pointer-lock jump），一进游戏视角猛地甩一下就是它。
     if (performance.now() - lockAcquiredAt < 120) return;
@@ -2318,6 +2359,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     pitch = Math.max(-1.1, Math.min(1.1, pitch - dy * radPerCount));
   };
   const onMouseDown = (e: MouseEvent): void => {
+    if (playerDead) return;
     if (e.button === 0) firing = true;
   };
   const onMouseUp = (e: MouseEvent): void => {
@@ -2555,6 +2597,10 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
 
   /** 重置本局统计 */
   const resetSessionStats = (): void => {
+    playerHp = 100;
+    playerDead = false;
+    deathStartAt = 0;
+    deathEl.classList.add('hidden');
     stats.shots = 0;
     stats.hits = 0;
     stats.kills = 0;
@@ -2572,11 +2618,86 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     resetEnemy();
   };
 
+  /**
+   * 玩家受伤：扣血 + 红屏 + 记录"被攻击"，血量归零则进入阵亡流程。
+   * 抽成函数是为了让「敌人开火」和「测试钩子」走**同一条**代码路径，
+   * 避免出现"测的那条路和真实那条路不一样"的假验证。
+   */
+  const damagePlayer = (dmg: number): void => {
+    if (playerDead) return;
+    playerHp = Math.max(0, playerHp - dmg);
+    hpEl.textContent = String(playerHp);
+    sfx.enemyShot();
+    document.body.classList.add('s3-hurt');
+    window.setTimeout(() => document.body.classList.remove('s3-hurt'), 260);
+    if (currentEncounter) {
+      currentEncounter.attacked = true;
+      closeEncounter(false);
+    }
+    if (playerHp <= 0) {
+      playerDied();
+      return;
+    }
+    logEvent(`被击中：血量剩 ${playerHp}`);
+  };
+
+  /**
+   * 玩家阵亡：结束本局，进入死亡动画流程。
+   * 期间不再接受任何输入（移动 / 射击 / 转视角全停），敌人也停火（step 里直接返回），
+   * 但**渲染继续**——否则动画根本播不出来。
+   */
+  const playerDied = (): void => {
+    if (playerDead) return;
+    playerDead = true;
+    deathStartAt = performance.now();
+    stats.deaths++;
+    // 连续阵亡计数：完成一局（打满目标人数）才会清零，这里逐次累加
+    deathStreak++;
+    try {
+      localStorage.setItem(STREAK_KEY, String(deathStreak));
+    } catch {
+      // 存储不可用也不影响本次的嘲讽判定
+    }
+    // 连续死 3 次开始嘲讽（之后继续嘲讽，不再升级）
+    if (deathStreak >= TAUNT_AT) {
+      deathTextEl.textContent = '又死了，你个菜鸡';
+      deathTextEl.classList.add('is-taunt');
+      deathStreakEl.textContent = `连续阵亡 ${deathStreak} 次`;
+    } else {
+      deathTextEl.textContent = '你死了';
+      deathTextEl.classList.remove('is-taunt');
+      deathStreakEl.textContent = '';
+    }
+    logEvent(`玩家阵亡 #${stats.deaths}（血量归零，连续 ${deathStreak} 次）`);
+    hpEl.textContent = '0';
+    firing = false;
+    keys.clear();
+    crouching = false;
+    // 松开鼠标锁定：玩家接下来要点屏幕返回开始界面
+    if (document.pointerLockElement === canvas) void document.exitPointerLock();
+  };
+  /** 阵亡界面：点击任意处 → 回到开始界面（可以马上再来一局） */
+  deathEl.addEventListener('click', () => {
+    deathEl.classList.add('hidden');
+    playerDead = false;
+    running = false;
+    resetSessionStats();
+    overlay.classList.remove('hidden');
+    logEvent('阵亡后返回开始界面');
+  });
+
   /** 达成目标数量 → 结算成绩 */
   const endSession = (): void => {
     sessionOver = true;
     running = false;
     firing = false;
+    // 打满目标人数 = 这局没被反杀，连续阵亡清零（嘲讽从零开始）
+    deathStreak = 0;
+    try {
+      localStorage.setItem(STREAK_KEY, '0');
+    } catch {
+      // 忽略存储异常
+    }
     if (document.pointerLockElement === canvas) void document.exitPointerLock();
     const dur = (performance.now() - sessionStartAt) / 1000;
     const acc = stats.shots > 0 ? (stats.hits / stats.shots) * 100 : 0;
@@ -2741,10 +2862,13 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     hooks.onExit();
   });
   canvas.addEventListener('click', () => {
+    if (playerDead) return; // 阵亡时点画面不该再抢锁，而是留给"点击任意处返回"
     // 任何时候点击画面都尝试重新捕获鼠标（避免"没锁上就彻底动不了"）
     if (document.pointerLockElement !== canvas) tryLock();
   });
   document.addEventListener('pointerlockchange', () => {
+    // 阵亡时会主动退出指针锁定，别把它当成"玩家暂停"去弹开始菜单
+    if (playerDead) return;
     if (document.pointerLockElement === canvas) {
       // 记录锁定时刻：接下来的 120ms 内忽略鼠标位移（防锁定瞬间的补交位移）
       lockAcquiredAt = performance.now();
@@ -2794,6 +2918,27 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     if (dt * 1000 > maxFrameMs) maxFrameMs = dt * 1000;
     if (benchMode) benchSamples.push(dt * 1000);
     if (!running) return;
+    // —— 阵亡流程：播死亡动画（倒地 → 约 3 秒后弹出「你死了」）——
+    // 这里提前返回，所以移动/射击/敌人 AI 全部停止，但渲染必须继续（否则动画播不出来）。
+    if (playerDead) {
+      const since = now - deathStartAt;
+      const t = Math.min(1, since / DEATH_FALL_MS);
+      const fall = 1 - Math.pow(1 - t, 3); // easeOutCubic：先快后慢，像真的被撂倒
+      // 第一人称倒地：视线高度掉到 0.34m + 侧倾 + 枪跟着垂下去
+      camera.position.set(playerPos.x, CONFIG.eyeHeight - fall * (CONFIG.eyeHeight - 0.34), playerPos.z);
+      camera.rotation.set(pitch - fall * 0.26, yaw + fall * 0.42, fall * 1.18);
+      rifle.position.set(0.2 + fall * 0.3, -0.2 - fall * 0.62, -0.34 + fall * 0.12);
+      rifle.rotation.set(fall * 0.95, 0.05, fall * 0.55);
+      flashMesh.material.opacity = 0;
+      if (since >= DEATH_TEXT_MS && deathEl.classList.contains('hidden')) {
+        deathEl.classList.remove('hidden');
+        logEvent('显示阵亡界面');
+      }
+      renderer.render(scene, camera);
+      renderFrames++;
+      lastRenderDoneAt = performance.now();
+      return;
+    }
     // 运行中但鼠标没被捕获 → 明确提示（这就是之前"卡住动不了"的可见症状）
     if (running && document.pointerLockElement !== canvas) {
       lockHintEl.classList.remove('hidden');
@@ -3150,25 +3295,13 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         }
         enemyAI.strafeWaitT = 0;
         enemyAI.blocked = 0;
-        // 开火：扣血 + 红屏 + 阵亡计数
-        // 注意：这里**不能** resetEnemy()——那会把敌人血量一起回满（曾经的"无敌帧"Bug）
-        stats.deaths++;
-        logEvent(`玩家阵亡 #${stats.deaths}`);
-        hpEl.textContent = '0';
-        sfx.enemyShot();
-        document.body.classList.add('s3-hurt');
-        window.setTimeout(() => document.body.classList.remove('s3-hurt'), 260);
-        if (currentEncounter) {
-          currentEncounter.attacked = true;
-          closeEncounter(false);
-        }
-        // 保持血量与位置，敌人继续瞄准（下次开火前有同样的前摇），直到被击杀
+        // 开火：走统一的受伤/阵亡逻辑（真正的血量，不再是"显示 0 再变回 100"的假血量）
+        damagePlayer(ENEMY_SHOT_DAMAGE);
+        if (playerDead) return; // 已经阵亡：不再安排下一枪
+        // 没死就继续：敌人保持位置，下次开火前仍有同样的前摇（给玩家补枪/躲掩体的机会）
         enemyAI.timer =
           (CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0])) *
           enemyAI.paceFactor;
-        window.setTimeout(() => {
-          hpEl.textContent = '100';
-        }, 900);
       }
     } else if (enemyAI.state === 'dead') {
       // 倒地动画（放慢，并保留尸体一小段时间，避免看起来"打死又复活"）

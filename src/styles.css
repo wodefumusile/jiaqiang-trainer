@@ -309,6 +309,112 @@ button {
 }
 
 /* ---------- 受击红屏 ---------- */
+/* ---------- 阵亡界面（死亡动画结束后弹出） ---------- */
+/**
+ * 通用覆盖层：加载进度（#s3-loading）与结算成绩（#s3-result）用的就是这个类。
+ * 之前 2D 版被删时把 .overlay 的样式一起删了，这两个界面一直是无样式状态
+ * （贴在左上角、没有背景遮罩）——这里补回来。
+ */
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 7, 9, 0.72);
+  backdrop-filter: blur(3px);
+  z-index: 12;
+}
+
+.overlay.hidden {
+  display: none;
+}
+
+.s3-dead {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  cursor: pointer;
+  z-index: 14;
+  background:
+    radial-gradient(ellipse at center, rgba(120, 0, 0, 0.28) 0%, rgba(0, 0, 0, 0.82) 72%),
+    rgba(8, 0, 0, 0.45);
+  animation: deadFade 0.5s ease-out;
+}
+
+.s3-dead.hidden {
+  display: none;
+}
+
+.s3-dead-text {
+  font: 900 clamp(56px, 13vw, 160px) / 1 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  letter-spacing: 0.12em;
+  color: #ff2f2f;
+  text-shadow:
+    0 0 26px rgba(255, 40, 40, 0.75),
+    0 6px 24px rgba(0, 0, 0, 0.9);
+  animation: deadPop 0.55s cubic-bezier(0.2, 1.5, 0.4, 1);
+}
+
+/* 连续死亡 3 次后的嘲讽：句子更长，字号收一点，颜色更暗红（笑得没那么白） */
+.s3-dead-text.is-taunt {
+  font-size: clamp(34px, 7.6vw, 96px);
+  letter-spacing: 0.06em;
+  color: #ff4d4d;
+  text-shadow:
+    0 0 30px rgba(255, 60, 60, 0.8),
+    0 6px 26px rgba(0, 0, 0, 0.9);
+}
+
+.s3-dead-streak {
+  min-height: 18px;
+  font-size: 13px;
+  letter-spacing: 0.24em;
+  color: #ff8f8f;
+  opacity: 0.9;
+}
+
+.s3-dead-hint {
+  font-size: 15px;
+  letter-spacing: 0.14em;
+  color: #d8d2d2;
+  opacity: 0;
+  animation: deadHint 0.4s ease-out 0.7s forwards;
+}
+
+@keyframes deadFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes deadPop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes deadHint {
+  to {
+    opacity: 1;
+  }
+}
+
 body.s3-hurt::after {
   content: '';
   position: fixed;

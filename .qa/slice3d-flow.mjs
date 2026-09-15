@@ -48,6 +48,7 @@ let lastRenders = (await snap())?.renders ?? 0;
 let lastAdvance = Date.now();
 let killed = null;
 let walkStallMs = 0;
+let deaths = 0;
 
 for (let i = 0; i < 260; i++) {
   const s = await snap();
@@ -84,6 +85,18 @@ for (let i = 0; i < 260; i++) {
     const after = (await snap()) ?? s;
     killed = { target, kills: after.kills, state: after.state, hp: after.hp };
     console.log('HEADSHOT', JSON.stringify(killed));
+  }
+  // 玩家现在会真的被打死（3 枪阵亡）：出现阵亡界面就回菜单重开一局，最多重试 2 次
+  if (await safe(page, () => window.__slice3d.playerState().dead)) {
+    deaths++;
+    console.log(`玩家阵亡（第 ${deaths} 次）→ 回菜单重开一局`);
+    await page.click('#s3-dead').catch(() => {});
+    await page.waitForTimeout(1200);
+    await ensureRunning(page);
+    killed = null;
+    seen.clear();
+    if (deaths >= 3) break;
+    continue;
   }
   if (killed && seen.has('dead') && seen.has('hidden')) break;
   await page.waitForTimeout(120);
