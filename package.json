@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "qa": "node scripts/qa.mjs"
+    "qa": "node scripts/qa.mjs",
+    "deploy": "node scripts/deploy-pages.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
