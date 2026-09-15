@@ -8,6 +8,7 @@
  * 检查项：页面载入 → 主页四单元 → 场景卡 → 进游戏（自动全屏）→ 持续出图 → 版本号 → 请求失败
  */
 import { chromium } from 'playwright-core';
+import { safe, renders, ensureRunning } from './lib.mjs';
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] ?? 'https://wodefumusile.github.io/jiaqiang-trainer/';
@@ -35,9 +36,10 @@ console.log('标题', JSON.stringify(title));
 console.log('四单元', JSON.stringify(units));
 console.log('场景卡', JSON.stringify(scenes));
 
-// 进游戏（点开始 → 可能自动全屏）
-await page.click('#s3-start');
-await page.waitForTimeout(3500);
+// 进游戏（点开始 → 自动全屏）。用统一的 ensureRunning：软件渲染环境偶发丢上下文会
+// 自动重载并停在开始界面，这里会自动重进，避免把"环境重载"误判成"线上有问题"。
+const entered = await ensureRunning(page);
+await page.waitForTimeout(1200);
 const info = await page.evaluate(() => {
   const d = window.__slice3d;
   const p = d.perf();
@@ -56,9 +58,9 @@ const info = await page.evaluate(() => {
   };
 });
 await page.waitForTimeout(1500);
-const after = await page.evaluate(() => window.__slice3d.perf().renders);
+const after = await renders(page);
 
-console.log('运行状态', JSON.stringify({ ...info, rendersAfter: after }));
+console.log('进入游戏', entered, '运行状态', JSON.stringify({ ...info, rendersAfter: after }));
 const checks = [
   ['四单元齐全', ['场景', '难度', '灵敏度', '准星'].every((w) => units.some((u) => u.includes(w)))],
   ['两张场景', scenes.length >= 2],
