@@ -425,6 +425,17 @@ body.s3-hurt::after {
   animation: dmgFlash 0.35s ease-out;
 }
 
+/* 被爆头：更重的红屏（范围更大、来得更猛），和身体命中区分开 */
+body.s3-hurt-head::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(255, 0, 0, 0.18) 0%, rgba(190, 0, 0, 0.85) 100%);
+  z-index: 20;
+  animation: dmgFlash 0.45s ease-out;
+}
+
 @keyframes dmgFlash {
   0% {
     opacity: 1;

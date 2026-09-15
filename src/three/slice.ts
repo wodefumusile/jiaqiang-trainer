@@ -31,7 +31,7 @@ import {
 import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-1.4';
+const BUILD_STAMP = 'v3d-1.5';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -41,8 +41,6 @@ const CONFIG = {
   crouchHeight: 1.05,
   /** 移动速度与灵敏度换算（复用 2D 版的 px/计数 → 3D 角度） */
   moveSpeed: 3.4,
-  /** 敌人停下后的开火前摇（秒） */
-  enemyAimTime: [0.55, 0.95],
   /**
    * 敌人移动速度（米/秒）。
    * 修正视线判定后（敌人不能再"隔着掩体看见你"），它必须真的走出来才可能有枪线，
@@ -201,17 +199,14 @@ const DEFAULT_SCENE_ID = 'room3d';
 const sceneById = (id: string | null): SceneDef => SCENES.find((s) => s.id === id) ?? SCENES[0];
 
 /**
- * 玩家躲进掩体、敌人失去视线之后，再重新露头时敌人至少要重新瞄这么久（秒）。
- * 不加这条的话，前摇会在玩家躲着的时候偷偷倒完 → 一探头就是零反应时间的秒杀。
- */
-const AIM_REACQUIRE_SEC = 0.55;
-
-/**
  * 敌人一枪对玩家造成的伤害。
  * 100 = 一枪毙命；40 = 三枪才死（贴近步枪的身体伤害：100 → 60 → 20 → 0）。
  * 想调难度改这一个数就够了。
  */
 const ENEMY_SHOT_DAMAGE = 40;
+
+/** 敌人爆头对玩家的伤害（直接毙命；命中/爆头概率见 TACTICS 的 hitRate / headRate） */
+const ENEMY_HEADSHOT_DAMAGE = 100;
 
 /** 死亡动画：倒地用时（毫秒） */
 const DEATH_FALL_MS = 1200;
@@ -296,6 +291,9 @@ function makeMat(params: {
  * paceHold   ："长架"节奏概率（先架稳再动，不急着出手）
  * paceRush   ："秒拉"节奏概率（peek 完立刻开枪，抢你的反应）
  * lead       ：枪线提前量（秒）——预瞄玩家横向移动的提前点
+ * fireDelay  ：停下后**必定开火**的时限（秒）。需求：不低于 0.2、不超过 0.5，难度越高越短。
+ * hitRate    ：开火命中玩家的概率（需求：0.30 → 0.90）
+ * headRate   ：命中里打头的比例（需求：0.10 → 0.60）
  * coverChange：中途换掩体｜jitter：移动速度随机抖动比例
  */
 const TACTICS: Record<
@@ -313,6 +311,9 @@ const TACTICS: Record<
     paceHold: number;
     paceRush: number;
     lead: number;
+    fireDelay: number;
+    hitRate: number;
+    headRate: number;
     coverChange: boolean;
     jitter: number;
   }
@@ -320,32 +321,32 @@ const TACTICS: Record<
   easy: {
     peekSet: [0.5, 1.0], crouch: 0.15, feint: false, feintDouble: false, strafeShoot: false,
     strafePause: 0, crouchSpam: 0, repeatPeek: false, wideBias: 0, paceHold: 0, paceRush: 0,
-    lead: 0.04, coverChange: false, jitter: 0,
+    lead: 0.04, fireDelay: 0.5, hitRate: 0.3, headRate: 0.1, coverChange: false, jitter: 0,
   },
   normal: {
     peekSet: [0.5, 1.0], crouch: 0.25, feint: false, feintDouble: false, strafeShoot: false,
     strafePause: 0, crouchSpam: 0.05, repeatPeek: false, wideBias: 0.1, paceHold: 0.15, paceRush: 0,
-    lead: 0.05, coverChange: false, jitter: 0.1,
+    lead: 0.05, fireDelay: 0.44, hitRate: 0.42, headRate: 0.2, coverChange: false, jitter: 0.1,
   },
   hard: {
     peekSet: [0.5, 1.0, 1.6], crouch: 0.4, feint: true, feintDouble: false, strafeShoot: false,
     strafePause: 0.1, crouchSpam: 0.15, repeatPeek: true, wideBias: 0.2, paceHold: 0.25, paceRush: 0.2,
-    lead: 0.08, coverChange: false, jitter: 0.2,
+    lead: 0.08, fireDelay: 0.38, hitRate: 0.54, headRate: 0.3, coverChange: false, jitter: 0.2,
   },
   insane: {
     peekSet: [0.5, 1.0, 1.6, 2.4], crouch: 0.45, feint: true, feintDouble: false, strafeShoot: false,
     strafePause: 0.2, crouchSpam: 0.25, repeatPeek: true, wideBias: 0.3, paceHold: 0.3, paceRush: 0.25,
-    lead: 0.1, coverChange: true, jitter: 0.3,
+    lead: 0.1, fireDelay: 0.32, hitRate: 0.66, headRate: 0.4, coverChange: true, jitter: 0.3,
   },
   master: {
     peekSet: [0.5, 1.0, 1.6, 2.4], crouch: 0.5, feint: true, feintDouble: false, strafeShoot: true,
     strafePause: 0.35, crouchSpam: 0.4, repeatPeek: true, wideBias: 0.45, paceHold: 0.35, paceRush: 0.3,
-    lead: 0.12, coverChange: true, jitter: 0.45,
+    lead: 0.12, fireDelay: 0.26, hitRate: 0.78, headRate: 0.5, coverChange: true, jitter: 0.45,
   },
   extreme: {
     peekSet: [1.0, 1.6, 2.4], crouch: 0.55, feint: true, feintDouble: true, strafeShoot: true,
     strafePause: 0.5, crouchSpam: 0.55, repeatPeek: true, wideBias: 0.6, paceHold: 0.4, paceRush: 0.35,
-    lead: 0.14, coverChange: true, jitter: 0.65,
+    lead: 0.14, fireDelay: 0.2, hitRate: 0.9, headRate: 0.6, coverChange: true, jitter: 0.65,
   },
 };
 
@@ -359,12 +360,12 @@ interface SliceHooks {
  * 玩家看一眼就知道这一档的敌人会做什么。
  */
 const DIFF_MENU_DESC: Record<string, string> = {
-  easy: '小身位 · 不还手战术',
-  normal: '小身位 · 偶尔蹲',
-  hard: '假动作 · 急停 · 擦弹再拉',
-  insane: '大身位 · 换掩体 · 蹲起',
-  master: '横移对枪 · 预瞄提前量',
-  extreme: '双段假动作 · 大身位横拉',
+  easy: '小身位｜命中 30% · 爆头 10%',
+  normal: '小身位 · 偶尔蹲｜命中 42% · 爆头 20%',
+  hard: '假动作 · 急停｜命中 54% · 爆头 30%',
+  insane: '大身位 · 换掩体 · 蹲起｜命中 66% · 爆头 40%',
+  master: '横移对枪 · 预瞄提前量｜命中 78% · 爆头 50%',
+  extreme: '双段假动作 · 大身位横拉｜命中 90% · 爆头 60%',
 };
 
 /**
@@ -1876,8 +1877,25 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     },
     /** 测试钩子：对玩家造成伤害（与敌人开火走同一条代码路径，用于验证死亡流程） */
     hurtPlayer: (dmg = ENEMY_SHOT_DAMAGE) => damagePlayer(dmg),
+    /** 测试钩子：直接让敌人开一枪（与真实开火同一条路径，用于统计命中率/爆头率） */
+    forceEnemyFire: () => enemyFire(),
+    /** 测试钩子：让敌人重走一次「刷新 → 拉出 → 停下」，用于测量"停下到开火"的真实间隔 */
+    forceEnemyCycle: () => {
+      enemyAI.state = 'hidden';
+      enemyAI.timer = 0.25;
+      enemyAI.feintPlan = false;
+    },
     /** 只读：玩家血量 / 是否阵亡 / 连续阵亡次数 */
     playerState: () => ({ hp: playerHp, dead: playerDead, streak: deathStreak }),
+    /** 测试钩子：直接设置玩家血量（统计命中率时把血量拉高，避免中途阵亡打断采样） */
+    setPlayerHp: (hp: number) => {
+      playerHp = Math.max(1, Math.round(hp));
+      hpEl.textContent = String(playerHp);
+    },
+    /** 只读：敌人开火统计（命中率/爆头率自检） */
+    enemyFireStats: () => ({ shots: enemyShots, hits: enemyHits, headshots: enemyHeadshots }),
+    /** 只读：当前难度的开火参数（时限/命中率/爆头率） */
+    fireParams: () => ({ delay: +enemyFireDelay().toFixed(3), ...tactics() }),
     setQuality: (q: 'high' | 'medium' | 'low') => {
       autoQuality = false;
       applyQuality(q);
@@ -2619,17 +2637,71 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   };
 
   /**
+   * 本次「停下 → 开火」的时限（秒）。
+   * 需求：再慢也不超过 0.5s、再快也不低于 0.2s，且难度越高越短，到点**必定开火**。
+   * 出手节奏 paceFactor（秒拉/长架）保留为窗口内的变化，但会被夹回区间——
+   * 它是"在 0.2~0.5 之间怎么变"，不能破坏"必然开火"这条规则。
+   */
+  const enemyFireDelay = (): number => Math.min(0.5, Math.max(0.2, tactics().fireDelay * enemyAI.paceFactor));
+
+  /** 敌人开火统计（自检用来看命中率/爆头率是否落在需求区间） */
+  let enemyShots = 0;
+  let enemyHits = 0;
+  let enemyHeadshots = 0;
+  const enemyMissRay = new THREE.Raycaster();
+  /**
+   * 未命中的反馈：让子弹从玩家身边擦过去，打在背后的墙上（弹孔 + 火花）。
+   * 没有这个反馈的话，"敌人开了一枪但没打中"玩家根本察觉不到，会以为敌人没开火。
+   */
+  const spawnEnemyMiss = (): void => {
+    const g = enemy.group;
+    const from = _v1.set(g.position.x, g.position.y + 1.6 * g.scale.y, g.position.z);
+    const dir = _v2.copy(camera.position).sub(from).normalize();
+    // 随机偏 3~6 度：足够擦身而过，又不至于看起来像乱打
+    const off = 0.05 + Math.random() * 0.06;
+    const yawOff = (Math.random() * 2 - 1) * off;
+    const cos = Math.cos(yawOff);
+    const sin = Math.sin(yawOff);
+    dir.set(dir.x * cos - dir.z * sin, dir.y + (Math.random() * 2 - 1) * off * 0.6, dir.x * sin + dir.z * cos).normalize();
+    enemyMissRay.set(from, dir);
+    enemyMissRay.far = 60;
+    const hits = enemyMissRay.intersectObjects(room.walls, false);
+    const p = hits.length > 0 ? hits[0].point : from.clone().addScaledVector(dir, 14);
+    const n = hits.length > 0 ? (hits[0].face?.normal ?? new THREE.Vector3(0, 1, 0)) : new THREE.Vector3(0, 1, 0);
+    addDecal(p, n);
+    spawnSparks(p, n, 5);
+  };
+
+  /**
+   * 敌人开一枪：先掷「命中/未命中」，命中再掷「头/身体」。
+   * 概率随难度变化（命中 30%→90%，命中里爆头 10%→60%）。
+   */
+  const enemyFire = (): void => {
+    enemyShots++;
+    sfx.enemyShot();
+    const t = tactics();
+    if (Math.random() >= t.hitRate) {
+      spawnEnemyMiss();
+      return;
+    }
+    const head = Math.random() < t.headRate;
+    enemyHits++;
+    if (head) enemyHeadshots++;
+    damagePlayer(head ? ENEMY_HEADSHOT_DAMAGE : ENEMY_SHOT_DAMAGE, head);
+  };
+
+  /**
    * 玩家受伤：扣血 + 红屏 + 记录"被攻击"，血量归零则进入阵亡流程。
    * 抽成函数是为了让「敌人开火」和「测试钩子」走**同一条**代码路径，
    * 避免出现"测的那条路和真实那条路不一样"的假验证。
    */
-  const damagePlayer = (dmg: number): void => {
+  const damagePlayer = (dmg: number, head = false): void => {
     if (playerDead) return;
     playerHp = Math.max(0, playerHp - dmg);
     hpEl.textContent = String(playerHp);
-    sfx.enemyShot();
-    document.body.classList.add('s3-hurt');
-    window.setTimeout(() => document.body.classList.remove('s3-hurt'), 260);
+    if (head) sfx.hit(); // 爆头的额外反馈：比身体命中更"响"
+    document.body.classList.add(head ? 's3-hurt-head' : 's3-hurt');
+    window.setTimeout(() => document.body.classList.remove(head ? 's3-hurt-head' : 's3-hurt'), head ? 420 : 260);
     if (currentEncounter) {
       currentEncounter.attacked = true;
       closeEncounter(false);
@@ -2638,7 +2710,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       playerDied();
       return;
     }
-    logEvent(`被击中：血量剩 ${playerHp}`);
+    logEvent(`${head ? '被爆头' : '被击中'}：血量剩 ${playerHp}`);
   };
 
   /**
@@ -3193,9 +3265,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       if (arrived || enemyLineClear(g.position.x, g.position.z)) {
         enemyAI.state = 'aiming';
         // 需求⑦-G：出手节奏——秒拉(<1)/正常/长架(>1)，避免玩家摸到固定节拍
-        enemyAI.timer =
-          (CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0])) *
-          enemyAI.paceFactor;
+        // 需求：停下后必定在 0.2~0.5s 内开火（难度越高越短）
+        enemyAI.timer = enemyFireDelay();
         enemyAI.strafeWaitT = 0;
         enemy.leftLeg.rotation.x = 0;
         enemy.rightLeg.rotation.x = 0;
@@ -3261,7 +3332,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         enemyAI.blocked += dt;
         // 玩家躲好了：这一枪不该"憋着"等他探头再秒射（那是零反应时间）。
         // 躲超过 0.5 秒就重置前摇，玩家重新露头时仍然有完整的反应窗口。
-        if (enemyAI.blocked > 0.5) enemyAI.timer = Math.max(enemyAI.timer, AIM_REACQUIRE_SEC);
+        if (enemyAI.blocked > 0.5) enemyAI.timer = Math.max(enemyAI.timer, enemyFireDelay());
         if (enemyAI.blocked > 1.2) {
           enemyAI.blocked = 0;
           if (enemyAI.canChangeCover) {
@@ -3288,20 +3359,14 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         enemyAI.timer -= dt;
         enemyAI.blocked = 0;
         if (enemyAI.timer > 0) return;
-        // 需求⑦-C2：尽量把这一枪留在"急停"里开；但最多等 0.7 秒，别把玩家晾着
-        if (enemyAI.strafeShoot && enemyAI.strafePauseT <= 0) {
-          enemyAI.strafeWaitT += dt;
-          if (enemyAI.strafeWaitT < 0.7) return;
-        }
+        // 到点就开：不再为了"等一个急停"而延后（那会破坏 0.2~0.5s 必然开火的规则）
         enemyAI.strafeWaitT = 0;
         enemyAI.blocked = 0;
-        // 开火：走统一的受伤/阵亡逻辑（真正的血量，不再是"显示 0 再变回 100"的假血量）
-        damagePlayer(ENEMY_SHOT_DAMAGE);
+        // 开火：按难度掷命中/爆头，命中才走受伤逻辑
+        enemyFire();
         if (playerDead) return; // 已经阵亡：不再安排下一枪
-        // 没死就继续：敌人保持位置，下次开火前仍有同样的前摇（给玩家补枪/躲掩体的机会）
-        enemyAI.timer =
-          (CONFIG.enemyAimTime[0] + Math.random() * (CONFIG.enemyAimTime[1] - CONFIG.enemyAimTime[0])) *
-          enemyAI.paceFactor;
+        // 没死就继续：下一枪同样在 0.2~0.5s 内打出（提高了开火频率，但"停下"的节奏不变）
+        enemyAI.timer = enemyFireDelay();
       }
     } else if (enemyAI.state === 'dead') {
       // 倒地动画（放慢，并保留尸体一小段时间，避免看起来"打死又复活"）
