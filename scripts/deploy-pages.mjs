@@ -68,10 +68,14 @@ try {
 
   console.log('[4/5] 提交…');
   run('git add -A', tmp);
-  if (run('git status --porcelain', tmp).trim() === '') {
+  // 注意必须用 quiet=true 才会把输出"捕获成字符串"；否则 stdio 继承、返回 null，
+  // 会被误判成"没有变化"而跳过发布（这个坑真实踩过一次，线上没更新）
+  const changed = run('git status --porcelain', tmp, true).trim();
+  if (changed === '') {
     // 构建产物与线上完全一致（例如只改了文档）→ 没有可提交的内容，正常结束
     console.log('  构建产物与线上一致，无需发布');
   } else {
+    console.log(`  共 ${changed.split('\n').length} 个文件有变化`);
     run(`git commit -q -m "deploy: ${version} 构建产物（${new Date().toISOString().slice(0, 16).replace('T', ' ')}）"`, tmp);
     console.log('[5/5] 推送 gh-pages…');
     run('git push origin gh-pages', tmp);
