@@ -58,10 +58,10 @@ console.log('全屏下持续出图', after.renders > entered.renders ? '✅' : '
 
 // 3) F 键切换
 await page.keyboard.press('KeyF');
-await page.waitForTimeout(1300);
+await page.waitForTimeout(2000); // 全屏切换有过渡动画，等久一点，避免"过渡中再请求"被拒
 const out1 = await fsInfo();
 await page.keyboard.press('KeyF');
-await page.waitForTimeout(1300);
+await page.waitForTimeout(2000);
 const back = await fsInfo();
 console.log('F 键切换', !out1.fullscreen && back.fullscreen ? '✅ 能退出也能再进' : `❌ out=${out1.fullscreen} back=${back.fullscreen}`);
 

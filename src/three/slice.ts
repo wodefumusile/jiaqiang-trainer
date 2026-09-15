@@ -31,7 +31,7 @@ import {
 import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-1.5';
+const BUILD_STAMP = 'v3d-1.6';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -2264,12 +2264,12 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     sfx.reloadStart();
   };
 
-  const showBanner = (text: string): void => {
+  const showBanner = (text: string, ms = 850): void => {
     bannerEl.textContent = text;
     bannerEl.className = 's3-banner show';
     window.setTimeout(() => {
       bannerEl.className = 's3-banner';
-    }, 850);
+    }, ms);
   };
 
   /** 命中准星闪光 */
@@ -2798,7 +2798,16 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     // 失败也不影响开打，玩家可以随时按 F 或点菜单里的全屏按钮重试。
     if (autoFullscreen && !document.fullscreenElement) {
       void requestFullscreen().then((ok) => {
-        if (!ok) logEvent('自动全屏被浏览器拒绝');
+        if (!ok) {
+          logEvent('自动全屏被浏览器拒绝');
+          // 关键：失败了要"说出来"。否则玩家只会觉得"全屏没生效"，
+          // 完全不知道是浏览器拦了，也不知道还能按 F 手动进。
+          // 延迟 0.9 秒再弹、显示 3 秒：避免和"软件渲染警告"等开局横幅互相覆盖。
+          window.setTimeout(
+            () => showBanner('浏览器拒绝了自动全屏 → 按 F 手动切换（或回菜单点「全屏（F）」）', 3000),
+            900,
+          );
+        }
       });
     }
     // 关键修复：指针锁定必须在"用户手势"内**同步**申请。
