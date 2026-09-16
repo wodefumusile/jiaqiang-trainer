@@ -54,6 +54,7 @@ const info = await page.evaluate(() => {
     // 新功能是否真的在线上包里（真血量/阵亡流程 + 概率开火模型）
     hasDeathFlow: typeof d.playerState === 'function' && typeof d.hurtPlayer === 'function',
     hasFireModel: typeof d.enemyFireStats === 'function' && typeof d.fireParams === 'function',
+    hasHurtFx: typeof d.hurtFx === 'function' && !!document.querySelector('#s3-blood'),
     hitRate: d.fireParams().hitRate,
   };
 });
@@ -68,6 +69,7 @@ const checks = [
   ['自动全屏', info.fullscreen],
   ['死亡流程已上线', info.hasDeathFlow],
   ['概率开火模型已上线', info.hasFireModel],
+  ['受击/阵亡特效已上线（震动+渐红+见血音效）', info.hasHurtFx],
   ['无请求失败', failed.length === 0],
   ['无脚本报错', errors.length === 0],
 ];
