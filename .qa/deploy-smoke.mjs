@@ -13,7 +13,12 @@ import { safe, renders, ensureRunning } from './lib.mjs';
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] ?? 'https://wodefumusile.github.io/jiaqiang-trainer/';
 const WANT_VERSION = process.argv[3] ?? '';
-const PROXY = process.env.DEPLOY_SMOKE_PROXY ?? 'http://127.0.0.1:7892';
+/**
+ * 代理默认不开：本机直连 GitHub 是通的。
+ * 需要走代理时用环境变量指定，例如 $env:DEPLOY_SMOKE_PROXY='http://127.0.0.1:7892'
+ * （踩过的坑：把代理写死之后，代理软件一关，冒烟测试就全线报 ERR_PROXY_CONNECTION_FAILED）
+ */
+const PROXY = process.env.DEPLOY_SMOKE_PROXY ?? '';
 
 const args = ['--no-sandbox', '--use-gl=swiftshader'];
 if (PROXY) args.push(`--proxy-server=${PROXY}`);

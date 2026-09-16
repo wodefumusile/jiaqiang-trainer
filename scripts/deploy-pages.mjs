@@ -73,12 +73,22 @@ try {
   const changed = run('git status --porcelain', tmp, true).trim();
   if (changed === '') {
     // 构建产物与线上完全一致（例如只改了文档）→ 没有可提交的内容，正常结束
-    console.log('  构建产物与线上一致，无需发布');
+    console.log('  构建产物与本地 gh-pages 一致，无需新建提交');
   } else {
     console.log(`  共 ${changed.split('\n').length} 个文件有变化`);
     run(`git commit -q -m "deploy: ${version} 构建产物（${new Date().toISOString().slice(0, 16).replace('T', ' ')}）"`, tmp);
-    console.log('[5/5] 推送 gh-pages…');
+  }
+  /**
+   * 关键：是否推送要看"本地 gh-pages 有没有领先远端"，而不是"这次有没有新提交"。
+   * 踩过的坑：某次发布时本地已提交但推送失败（网络/代理挂了），下次再跑时
+   * 因为"内容无变化"直接跳过推送 —— 于是线上永远停在旧版本。
+   */
+  const ahead = run('git rev-list --count origin/gh-pages..gh-pages', tmp, true).trim();
+  if (ahead !== '0') {
+    console.log(`[5/5] 推送 gh-pages（领先远端 ${ahead} 个提交）…`);
     run('git push origin gh-pages', tmp);
+  } else {
+    console.log('  远端 gh-pages 已是最新，无需推送');
   }
 } finally {
   // 无论成功失败都要把临时工作树清掉，否则下次 git 会抱怨残留
