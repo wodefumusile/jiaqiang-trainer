@@ -99,6 +99,27 @@ class Sfx {
     this.tone(220, 0.1, 'square', 0.12, 0.05);
   }
 
+  /**
+   * 见血：被打中时那声"噗"。
+   * 低频闷响（金属/身体被击中的钝感）+ 一层带通噪声（血/组织的湿声），
+   * intense=true（爆头）时整体更低更重。
+   */
+  bloodHit(intense = false): void {
+    const base = intense ? 62 : 92;
+    this.tone(base, intense ? 0.26 : 0.16, 'triangle', intense ? 0.4 : 0.3);
+    this.tone(base * 1.5, 0.1, 'sine', 0.14, 0.02);
+    // 噪声走 lowpass 的"闷"版本：模仿湿声而不是清脆爆音
+    this.noise(intense ? 0.2 : 0.12, intense ? 0.42 : 0.3, intense ? 700 : 1100);
+  }
+
+  /** 阵亡：更沉的冲击 + 拖尾（像被撂倒 + 血喷） */
+  deathThud(): void {
+    this.tone(58, 0.4, 'sine', 0.5);
+    this.tone(38, 0.5, 'triangle', 0.3, 0.03);
+    this.noise(0.35, 0.4, 500, 0.02);
+    this.noise(0.5, 0.22, 260, 0.16); // 尾音：血/倒地
+  }
+
   /** 空仓挂机 */
   empty(): void {
     this.tone(1400, 0.03, 'square', 0.05);

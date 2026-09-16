@@ -31,7 +31,7 @@ import {
 import type { CrosshairStyle, EncounterRecord, SensitivityProfile, ShotRecord } from '../types';
 
 /** 版本标识：HUD 会显示它——用于一眼判断"浏览器里跑的是不是最新代码" */
-const BUILD_STAMP = 'v3d-1.6';
+const BUILD_STAMP = 'v3d-1.7';
 
 /** 可调参数（后续换 glTF 模型时只改这里） */
 const CONFIG = {
@@ -217,6 +217,18 @@ const DEATH_TEXT_MS = 2800;
 const STREAK_KEY = 'jg.slice3d.deathStreak';
 /** 连续死几次开始嘲讽 */
 const TAUNT_AT = 3;
+
+/* ---- 受击 / 阵亡的表现反馈参数（纯表现，不参与任何伤害与命中判定） ---- */
+/** 受击红屏：冲到峰值用时（毫秒） */
+const BLOOD_ATTACK_MS = 110;
+/** 受击红屏：从峰值回落到 0 用时（毫秒） */
+const BLOOD_DECAY_MS = 460;
+/** 阵亡红屏最终深度（保持到玩家点击返回） */
+const DEATH_RED_MAX = 0.9;
+/** 相机震动：身体受击 / 爆头 / 阵亡 的幅度（米）与时长（毫秒） */
+const SHAKE_HIT = { amp: 0.035, rot: 0.012, ms: 300 };
+const SHAKE_HEAD = { amp: 0.06, rot: 0.022, ms: 450 };
+const SHAKE_DEATH = { amp: 0.09, rot: 0.03, ms: 1400 };
 
 /**
  * 难度 → 各距离档位的**权重**（不是开关）。
@@ -668,6 +680,8 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       <div class="s3-dmg" id="s3-dmg"></div>
       <div class="s3-banner" id="s3-banner"></div>
       <div class="s3-lock-hint hidden" id="s3-lock-hint">点击画面以捕获鼠标（否则无法转视角）</div>
+      <!-- 受击/阵亡的渐变红屏：透明度由 JS 每帧驱动（纯 DOM，不占 GPU） -->
+      <div class="s3-blood" id="s3-blood"></div>
       <!-- 阵亡界面：先播死亡动画，约 3 秒后弹出大字，点击任意处回开始界面 -->
       <div class="s3-dead hidden" id="s3-dead">
         <div class="s3-dead-text" id="s3-dead-text">你死了</div>
@@ -873,6 +887,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   const deathEl = container.querySelector<HTMLElement>('#s3-dead')!;
   const deathTextEl = container.querySelector<HTMLElement>('#s3-dead-text')!;
   const deathStreakEl = container.querySelector<HTMLElement>('#s3-dead-streak')!;
+  const bloodEl = container.querySelector<HTMLElement>('#s3-blood')!;
   /**
    * 关键：场景构建需要几百毫秒，如果用户在构建完成前点"点击进入"，这一下会被丢掉
    * （表现就是"点了没反应 / 卡住动不了"，时好时坏）。这里在最开头就记下点击意图，
@@ -1894,6 +1909,15 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     },
     /** 只读：敌人开火统计（命中率/爆头率自检） */
     enemyFireStats: () => ({ shots: enemyShots, hits: enemyHits, headshots: enemyHeadshots }),
+    /** 只读：受击/阵亡的表现层状态（震动幅度、红屏透明度、见血音效次数） */
+    hurtFx: () => ({
+      blood: +bloodShown.toFixed(3),
+      shakeAmp: +shakeAmp.toFixed(4),
+      shakeLeftMs: Math.max(0, Math.round(shakeUntil - performance.now())),
+      lastShake: { ...lastShakeOffset },
+      bloodSfx: bloodSfxCount,
+      dead: playerDead,
+    }),
     /** 只读：当前难度的开火参数（时限/命中率/爆头率） */
     fireParams: () => ({ delay: +enemyFireDelay().toFixed(3), ...tactics() }),
     setQuality: (q: 'high' | 'medium' | 'low') => {
@@ -2099,6 +2123,87 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
   } catch {
     deathStreak = 0;
   }
+
+  /* ---------------- 受击 / 阵亡的表现反馈（震动 · 渐红 · 见血音效） ----------------
+   * 全部是纯表现层：不参与伤害与命中判定，也不影响帧率
+   * （红屏 = DOM 透明度，震动 = 每帧几个浮点运算，音效 = WebAudio 合成）。
+   */
+  /** 本次受击红屏的峰值与开始时刻 */
+  let bloodPeak = 0;
+  let bloodAt = -1e9;
+  /** 已经写到 DOM 上的透明度（只在变化时写，避免每帧触发样式重算） */
+  let bloodShown = -1;
+  /** 相机震动：幅度、起止时刻、方向（沿"子弹来向"推，有方向感而不是乱抖） */
+  let shakeAmp = 0;
+  let shakeRot = 0;
+  let shakeStart = 0;
+  let shakeUntil = 0;
+  let shakeDirX = 0;
+  let shakeDirZ = 0;
+  /** 见血音效触发次数（自检用） */
+  let bloodSfxCount = 0;
+  /** 上一帧实际施加到相机上的震动偏移（自检用；相机位置每帧会被重置，采样容易错过） */
+  let lastShakeOffset = { x: 0, y: 0, z: 0, roll: 0 };
+
+  /** 触发一次红屏脉冲（峰值 0~1） */
+  const bloodFlash = (peak: number): void => {
+    bloodPeak = peak;
+    bloodAt = performance.now();
+  };
+  /** 当前红屏脉冲强度：先冲上峰值，再线性回落 */
+  const bloodLevelAt = (now: number): number => {
+    const t = now - bloodAt;
+    if (t < 0 || t > BLOOD_ATTACK_MS + BLOOD_DECAY_MS) return 0;
+    return t <= BLOOD_ATTACK_MS
+      ? bloodPeak * (t / BLOOD_ATTACK_MS)
+      : bloodPeak * Math.max(0, 1 - (t - BLOOD_ATTACK_MS) / BLOOD_DECAY_MS);
+  };
+  /**
+   * 加一次相机震动。
+   * 取"最大值"而不是累加：连续中弹时不会把画面越抖越散，始终是最猛那一档。
+   */
+  const addShake = (amp: number, rot: number, ms: number, dirX: number, dirZ: number): void => {
+    shakeAmp = Math.max(shakeAmp, amp);
+    shakeRot = Math.max(shakeRot, rot);
+    shakeStart = performance.now();
+    shakeUntil = shakeStart + ms;
+    shakeDirX = dirX;
+    shakeDirZ = dirZ;
+  };
+  /**
+   * 每帧更新受击表现：把震动叠加到相机上 + 驱动红屏透明度。
+   * 必须在"相机变换完成之后、renderer.render 之前"调用。
+   */
+  const updateHurtFx = (now: number): void => {
+    // —— 震动：平方衰减，结束时精确归零 ——
+    if (shakeUntil > shakeStart && now < shakeUntil) {
+      const k = 1 - (now - shakeStart) / (shakeUntil - shakeStart);
+      const a = shakeAmp * k * k;
+      const ox = (Math.random() * 2 - 1) * a + shakeDirX * a * 0.8;
+      const oy = (Math.random() * 2 - 1) * a * 0.8;
+      const oz = (Math.random() * 2 - 1) * a + shakeDirZ * a * 0.8;
+      const or = (Math.random() * 2 - 1) * shakeRot * k;
+      camera.position.x += ox;
+      camera.position.y += oy;
+      camera.position.z += oz;
+      camera.rotation.z += or;
+      camera.rotation.y += or * 0.4;
+      lastShakeOffset = { x: +ox.toFixed(4), y: +oy.toFixed(4), z: +oz.toFixed(4), roll: +or.toFixed(4) };
+    } else {
+      shakeAmp = 0;
+      shakeRot = 0;
+      lastShakeOffset = { x: 0, y: 0, z: 0, roll: 0 };
+    }
+    // —— 红屏：受击脉冲 与 阵亡渐红 取较大者 ——
+    const deathRed = playerDead
+      ? Math.min(DEATH_RED_MAX, 0.3 + Math.min(1, (now - deathStartAt) / DEATH_FALL_MS) * 0.6)
+      : 0;
+    const level = Math.max(bloodLevelAt(now), deathRed);
+    if (Math.abs(level - bloodShown) > 0.004) {
+      bloodShown = level;
+      bloodEl.style.opacity = level.toFixed(3);
+    }
+  };
 
   const decals: THREE.Mesh[] = [];
   const sparks: { mesh: THREE.Mesh; vel: THREE.Vector3; life: number }[] = [];
@@ -2619,6 +2724,16 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     playerDead = false;
     deathStartAt = 0;
     deathEl.classList.add('hidden');
+    // 表现层复位：红屏、震动、计数器（否则会在下一局留下残留）
+    bloodPeak = 0;
+    bloodAt = -1e9;
+    bloodShown = 0;
+    bloodEl.style.opacity = '0';
+    shakeAmp = 0;
+    shakeRot = 0;
+    shakeStart = 0;
+    shakeUntil = 0;
+    bloodSfxCount = 0;
     stats.shots = 0;
     stats.hits = 0;
     stats.kills = 0;
@@ -2702,6 +2817,19 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     if (head) sfx.hit(); // 爆头的额外反馈：比身体命中更"响"
     document.body.classList.add(head ? 's3-hurt-head' : 's3-hurt');
     window.setTimeout(() => document.body.classList.remove(head ? 's3-hurt-head' : 's3-hurt'), head ? 420 : 260);
+    // 受击表现三件套：震动（沿子弹来向推一把）+ 红屏脉冲 + 见血音效
+    const g = enemy.group;
+    const dx = camera.position.x - g.position.x;
+    const dz = camera.position.z - g.position.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const s = head ? SHAKE_HEAD : SHAKE_HIT;
+    addShake(s.amp, s.rot, s.ms, dx / len, dz / len);
+    bloodFlash(head ? 0.6 : 0.35);
+    sfx.bloodHit(head);
+    bloodSfxCount++;
+    // 血量数字也闪一下红，视线即使不在 HUD 上也能察觉到"掉了多少"
+    hpEl.classList.add('s3-hp-hit');
+    window.setTimeout(() => hpEl.classList.remove('s3-hp-hit'), head ? 420 : 260);
     if (currentEncounter) {
       currentEncounter.attacked = true;
       closeEncounter(false);
@@ -2747,6 +2875,11 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
     crouching = false;
     // 松开鼠标锁定：玩家接下来要点屏幕返回开始界面
     if (document.pointerLockElement === canvas) void document.exitPointerLock();
+    // 阵亡表现：更沉的震动（1.4s）+ 红屏立刻拉满（之后由"渐红到 0.9"接管）+ 倒地闷响
+    addShake(SHAKE_DEATH.amp, SHAKE_DEATH.rot, SHAKE_DEATH.ms, 0, 0);
+    bloodFlash(DEATH_RED_MAX);
+    sfx.deathThud();
+    bloodSfxCount++;
   };
   /** 阵亡界面：点击任意处 → 回到开始界面（可以马上再来一局） */
   deathEl.addEventListener('click', () => {
@@ -3015,6 +3148,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
         deathEl.classList.remove('hidden');
         logEvent('显示阵亡界面');
       }
+      updateHurtFx(now); // 倒地期间继续抖 + 画面持续变红
       renderer.render(scene, camera);
       renderFrames++;
       lastRenderDoneAt = performance.now();
@@ -3438,6 +3572,7 @@ export function mountThreeSlice(container: HTMLElement, hooks: SliceHooks): () =
       perfFrames = 0;
       perfAccum = 0;
     }
+    updateHurtFx(now); // 受击震动叠加 + 红屏透明度（必须在相机变换之后、渲染之前）
     renderer.render(scene, camera);
     renderFrames++; // 诊断：真实出图计数（看门狗的另一路心跳）
     lastRenderDoneAt = performance.now();

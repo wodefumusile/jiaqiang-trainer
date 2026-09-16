@@ -309,6 +309,39 @@ button {
 }
 
 /* ---------- 受击红屏 ---------- */
+/* 受击/阵亡的渐变红屏：透明度完全由 JS 每帧驱动（纯 DOM 图层，不吃 GPU） */
+.s3-blood {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 13;
+  background:
+    radial-gradient(
+      ellipse at center,
+      rgba(168, 12, 12, 0.5) 0%,
+      rgba(132, 6, 6, 0.86) 58%,
+      rgba(48, 0, 0, 0.96) 100%
+    );
+}
+
+/* 血量数字受击闪红 */
+.s3-hp-hit {
+  display: inline-block;
+  color: #ff5252 !important;
+  animation: hpFlash 0.34s ease-out;
+}
+
+@keyframes hpFlash {
+  0% {
+    transform: scale(1.4);
+    text-shadow: 0 0 12px rgba(255, 60, 60, 0.95);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
 /* ---------- 阵亡界面（死亡动画结束后弹出） ---------- */
 /**
  * 通用覆盖层：加载进度（#s3-loading）与结算成绩（#s3-result）用的就是这个类。
